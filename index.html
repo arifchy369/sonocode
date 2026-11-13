@@ -90,8 +90,9 @@
   <h1>Sonocode</h1>
   <p class="lead">
     Sonocode turns a sound clip of up to 10 seconds into a printable image. Audio is compressed with Opus
-    in your browser, protected with Reed-Solomon error correction, and stored as four grey tones with a
-    calibration row. Each audio packet carries its own checksum, so a damaged part is concealed instead of
+    in your browser, protected with Reed-Solomon error correction, and stored as four brightness levels
+    (soft colour or plain grey) with a calibration row. Only brightness carries data, so a black-and-white
+    copy of the image decodes just the same. Each audio packet carries its own checksum, so a damaged part is concealed instead of
     failing the whole clip.
   </p>
 </header>
@@ -119,6 +120,11 @@
       </label>
       <button class="btn rec" id="recBtn">Record</button>
       <span class="spacer"></span>
+      <select id="style" aria-label="Colour style">
+        <option value="dots" selected>Soft dots</option>
+        <option value="soft">Soft squares</option>
+        <option value="classic">Classic grey</option>
+      </select>
       <select id="quality" aria-label="Quality">
         <option value="6000">Lowest · Opus 6 kbps</option>
         <option value="10000">Low · Opus 10 kbps</option>
@@ -197,14 +203,40 @@ const TARGET_PX = 2000;      // aim for an image no larger than this on its long
 const CELL_MIN = 5, CELL_MAX = 12;   // cell size in pixels (cells are fully filled, no gaps)
 const PAD = 24;              // quiet zone in pixels
 
-// Four grey tones, well separated in luminance. Row 0 is a calibration row with these tones.
-const PALETTE = [
-  [24, 24, 24],     // 0 near-black
-  [92, 92, 92],     // 1 dark grey
-  [168, 168, 168],  // 2 light grey
-  [246, 246, 246]   // 3 near-white
-];
-const CSS_PALETTE = PALETTE.map(([r, g, b]) => `rgb(${r},${g},${b})`);
+// Only brightness (luma) carries data: four levels, well separated. The colour is free, so the
+// image can look soft and colourful and still decode the same after a black-and-white conversion.
+// Row 0 is a calibration row with these four levels.
+const STYLE_LUMA = {
+  soft:    [34, 100, 170, 236],
+  classic: [24, 92, 168, 246]
+};
+const SOFT_CHROMA = 30;
+// Luma of the Rec.601 formula is exactly Y here: R,G,B built from Y plus a chroma vector (YCbCr),
+// shrunk until it fits in 0..255 so the brightness is not changed by clipping.
+function yccRGB(Y, theta, c) {
+  for (let i = 0; i < 14; i++) {
+    const cb = c * Math.cos(theta), cr = c * Math.sin(theta);
+    const r = Y + 1.402 * cr, g = Y - 0.344136 * cb - 0.714136 * cr, b = Y + 1.772 * cb;
+    if (r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255)
+      return [Math.round(r), Math.round(g), Math.round(b)];
+    c *= 0.85;
+  }
+  return [Y, Y, Y];
+}
+// One calm warm hue (cream, sand, clay, brown) for the whole image: the four levels are just
+// darker and lighter tints of it. Change HUE (radians) to recolour: 2.5 sand, 3.0 sage, -0.35 blue.
+const HUE = 2.5;
+const DOT_CELL_MIN = 8;      // smallest cell used in dot mode, in pixels
+const DOT_RATIO = 0.86;      // dot diameter as a share of the cell
+const DOT_BG_LUMA = 205;     // brightness of the tinted ground behind the dots
+const hueAt = () => HUE;
+function toneRGB(style, tone, t) {
+  if (style === 'classic') { const v = STYLE_LUMA.classic[tone]; return [v, v, v]; }
+  return yccRGB(STYLE_LUMA.soft[tone], hueAt(t), SOFT_CHROMA);
+}
+const rgbCss = ([r, g, b]) => `rgb(${r},${g},${b})`;
+const toneColor = (style, tone, t) => rgbCss(toneRGB(style, tone, t));
+const frameColor = (style, t) => style === 'classic' ? '#000' : rgbCss(yccRGB(26, hueAt(t), 20));
 
 const $ = id => document.getElementById(id);
 const setStatus = (id, msg, isErr = false) => {
@@ -530,6 +562,7 @@ function setRecording(on) {
   $('recBtn').textContent = on ? 'Stop' : 'Record';
   $('audioFile').disabled = on;
   $('quality').disabled = on;
+  $('style').disabled = on;
   $('timer').textContent = on ? '0.0 s' : '';
   updateEncodeBtn();
 }
@@ -746,41 +779,91 @@ $('encodeBtn').onclick = async () => {
     const { payload, streamLen, B } = buildPayload(packets, n);
 
     // Layout: row 0 = calibration (tones 0..3 repeated), data from row 1
+    const look = $('style').value;                    // dots | soft | classic
+    const style = look === 'classic' ? 'classic' : 'soft';
     const syms = bytesToSymbols(payload);
     const COLS = pickCols(syms.length);
     const rows = 1 + Math.ceil(syms.length / COLS);
     if (rows > 1500) throw new Error('clip too large for one image. Choose a lower quality.');
 
     const gw = COLS + 2, gh = rows + 2;
-    const CELL = Math.max(CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / Math.max(gw, gh))));
+    // Dots need room to look round, so that mode always uses cells of at least 8 px (a larger image)
+    const dots = look === 'dots';
+    const CELL = Math.max(dots ? DOT_CELL_MIN : CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / Math.max(gw, gh))));
+    const BAND = 48;                       // caption strip below the grid (not read by the decoder)
+    const gridH = gh * CELL;
     const cv = $('codeCanvas');
     cv.width = gw * CELL + PAD * 2;
-    cv.height = gh * CELL + PAD * 2;
+    cv.height = gridH + PAD * 2 + BAND;
     const g = cv.getContext('2d');
     g.fillStyle = '#fff';
     g.fillRect(0, 0, cv.width, cv.height);
 
-    const fillCell = (row, col, colour) => {
-      g.fillStyle = colour;
-      g.fillRect(PAD + (col + 1) * CELL, PAD + (row + 1) * CELL, CELL, CELL);
+    const STEPS = 64;
+    const table = [0, 1, 2, 3].map(tn => [toneColor(style, tn, 0)]);
+    const tAt = () => 0;
+    const fillCell = (row, col, tone) => {
+      const x = PAD + (col + 1) * CELL, y = PAD + (row + 1) * CELL;
+      g.fillStyle = table[tone][tAt(row, col)];
+      if (dots) { g.beginPath(); g.arc(x + CELL / 2, y + CELL / 2, CELL * DOT_RATIO / 2, 0, 6.2832); g.fill(); }
+      else g.fillRect(x, y, CELL, CELL);
     };
+    if (dots) {
+      // tinted ground behind the dots; its brightness sits between the levels, so blur that
+      // mixes ground into a dot disturbs the dark and light levels about equally
+      g.fillStyle = rgbCss(yccRGB(DOT_BG_LUMA, HUE, 14));
+      g.fillRect(PAD + CELL, PAD + CELL, (gw - 2) * CELL, (gh - 2) * CELL);
+    }
 
-    g.fillStyle = '#000';
+    // Frame: dark (brightness well under 80) so the reader can find it; softly tinted in colour mode
+    const gh1 = g.createLinearGradient(PAD, 0, PAD + gw * CELL, 0);
+    const gv1 = g.createLinearGradient(0, PAD, 0, PAD + gridH);
+    for (const t of [0, 0.5, 1]) {
+      gh1.addColorStop(t, frameColor(style, t));
+      gv1.addColorStop(t, frameColor(style, t));
+    }
+    g.fillStyle = gh1;
     g.fillRect(PAD, PAD, gw * CELL, CELL);
     g.fillRect(PAD, PAD + (gh - 1) * CELL, gw * CELL, CELL);
-    g.fillRect(PAD, PAD, CELL, gh * CELL);
-    g.fillRect(PAD + (gw - 1) * CELL, PAD, CELL, gh * CELL);
+    g.fillStyle = gv1;
+    g.fillRect(PAD, PAD, CELL, gridH);
+    g.fillRect(PAD + (gw - 1) * CELL, PAD, CELL, gridH);
 
-    for (let c = 0; c < CAL_CELLS; c++) fillCell(0, c, CSS_PALETTE[c % 4]);
+    for (let c = 0; c < CAL_CELLS; c++) fillCell(0, c, c % 4);
     for (let k = 0; k < syms.length; k++)
-      fillCell(1 + Math.floor(k / COLS), k % COLS, CSS_PALETTE[syms[k]]);
+      fillCell(1 + Math.floor(k / COLS), k % COLS, syms[k]);
+
+    // Caption strip: mini waveform of the clip and a label. Light on purpose and far from the frame.
+    const bandMid = PAD + gridH + PAD + BAND / 2;
+    const gridW = gw * CELL;
+    const ch = inBuffer.getChannelData(0), nS = Math.min(n, ch.length);
+    const BARS = Math.max(10, Math.min(80, Math.floor((gridW - 190) / 9)));
+    const peaks = [];
+    let mx = 1e-6;
+    for (let bI = 0; bI < BARS; bI++) {
+      const s0 = Math.floor(bI * nS / BARS), e0 = Math.max(s0 + 1, Math.floor((bI + 1) * nS / BARS));
+      let pk = 0;
+      for (let i = s0; i < e0 && i < nS; i++) pk = Math.max(pk, Math.abs(ch[i]));
+      peaks.push(pk);
+      if (pk > mx) mx = pk;
+    }
+    peaks.forEach((pk, bI) => {
+      const h = Math.max(4, (pk / mx) * (BAND - 12));
+      g.fillStyle = style === 'classic' ? 'rgb(176,176,176)' : rgbCss(yccRGB(165, hueAt(bI / BARS), 40));
+      g.fillRect(PAD + bI * 9, bandMid - h / 2, 5, h);
+    });
+    g.fillStyle = 'rgb(140,140,140)';
+    g.font = '600 15px Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+    g.textAlign = 'right';
+    g.textBaseline = 'middle';
+    g.fillText(`Sonocode · ${(n / SR).toFixed(1)} s`, PAD + gridW, bandMid);
 
     codeBlob = await new Promise(res => cv.toBlob(res, 'image/png'));
     $('codeResult').hidden = false;
     setStatus('inStatus',
-      `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · 4 grey tones\n` +
+      `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · ${look === 'classic' ? 'grey' : dots ? 'soft dots' : 'soft squares'}, 4 brightness levels\n` +
       `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${COLS} cols · ${cv.width}×${cv.height} px` +
-      (Math.max(cv.width, cv.height) > 2300 ? '\nThis image is large. For Messenger, a lower quality (10–16 kbps) or sending as a file works better.' : ''));
+      (Math.max(cv.width, cv.height) > (dots ? 4200 : 2300) ? '\nThis image is large. For Messenger, a lower quality (10–16 kbps) or sending as a file works better.' : ''));
   } catch (e) {
     setStatus('inStatus', 'Could not generate the code: ' + e.message, true);
   }
@@ -819,23 +902,88 @@ function readCode(img) {
   g.drawImage(img, 0, 0, cv.width, cv.height);
   const { data, width, height } = g.getImageData(0, 0, cv.width, cv.height);
 
-  // Frame detection by projection: the black frame makes whole rows and columns dark,
-  // so it survives blur, JPEG noise and stray dark pixels far better than a bounding box.
-  const rowCnt = new Uint32Array(height), colCnt = new Uint32Array(width);
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      if (data[i + 3] > 128 && 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] < 80) {
-        rowCnt[y]++; colCnt[x]++;
+  // Frame detection. The code may sit anywhere in the picture (a screenshot of a chat, a photo
+  // with other things around it), so the frame is found as a rectangle: a long dark horizontal
+  // line with white margin above it, a matching one with white margin below it, and dark sides.
+  const lum = new Uint8Array(width * height);
+  for (let p = 0, i = 0; p < lum.length; p++, i += 4)
+    lum[p] = data[i + 3] > 128 ? (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) : 255;
+
+  const findFrame = () => {
+    const DARK = 100, BRIGHT = 150, GAP = 2;
+    const minLen = Math.max(30, 0.2 * Math.min(width, height));
+    const runs = [];                                   // long dark horizontal runs
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      let x = 0;
+      while (x < width) {
+        if (lum[row + x] >= DARK) { x++; continue; }
+        const xa = x; let xb = x, gap = 0;
+        x++;
+        while (x < width) {
+          if (lum[row + x] < DARK) { xb = x; gap = 0; } else if (++gap > GAP) break;
+          x++;
+        }
+        if (xb - xa + 1 >= minLen) runs.push({ y, xa, xb });
       }
     }
-  let mr = 0, mc = 0;
-  for (let y = 0; y < height; y++) if (rowCnt[y] > mr) mr = rowCnt[y];
-  for (let x = 0; x < width; x++) if (colCnt[x] > mc) mc = colCnt[x];
-  if (mr < 20 || mc < 20) throw new Error('no code frame found');
+    const brightShare = (y, xa, xb) => {
+      if (y < 0 || y >= height) return 0;
+      const len = xb - xa + 1, a = xa + Math.floor(len * 0.1), b = xb - Math.floor(len * 0.1);
+      const step = Math.max(1, Math.floor((b - a) / 80));
+      let n = 0, hit = 0;
+      for (let x = a; x <= b; x += step) { n++; if (lum[y * width + x] > BRIGHT) hit++; }
+      return n ? hit / n : 0;
+    };
+    const darkShare = (x, ya, yb) => {
+      let n = 0, hit = 0;
+      for (let y = ya; y <= yb; y += 2) { n++; if (lum[y * width + x] < DARK) hit++; }
+      return n ? hit / n : 0;
+    };
+    const near = (a, b, t) => Math.abs(a - b) <= t;
+    let tops = [], bots = [];
+    for (const r of runs) if (brightShare(r.y - 4, r.xa, r.xb) >= 0.7) {
+      const k = tops[tops.length - 1];
+      if (!(k && r.y - k.y < 24 && near(k.xa, r.xa, 24))) tops.push(r);
+    }
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const r = runs[i];
+      if (brightShare(r.y + 4, r.xa, r.xb) >= 0.7) {
+        const k = bots[bots.length - 1];
+        if (!(k && k.y - r.y < 24 && near(k.xa, r.xa, 24))) bots.push(r);
+      }
+    }
+    let best = null, bestArea = 0;
+    for (const t of tops) for (const b of bots) {
+      const w = t.xb - t.xa + 1, h = b.y - t.y + 1;
+      if (h < 50 || w < 50) continue;
+      const tol = Math.max(6, 0.03 * w);
+      if (!near(t.xa, b.xa, tol) || !near(t.xb, b.xb, tol)) continue;
+      const xa = Math.min(t.xa, b.xa), xb = Math.max(t.xb, b.xb);
+      const l = Math.max(darkShare(Math.min(width - 1, xa + 1), t.y, b.y), darkShare(Math.min(width - 1, xa + 2), t.y, b.y));
+      const r2 = Math.max(darkShare(Math.max(0, xb - 1), t.y, b.y), darkShare(Math.max(0, xb - 2), t.y, b.y));
+      if (l < 0.7 || r2 < 0.7) continue;
+      if (w * h > bestArea) { bestArea = w * h; best = { x0: xa, x1: xb, y0: t.y, y1: b.y }; }
+    }
+    return best;
+  };
+
   let x0 = -1, x1 = -1, y0 = -1, y1 = -1;
-  for (let x = 0; x < width; x++) if (colCnt[x] >= mc * 0.5) { if (x0 < 0) x0 = x; x1 = x; }
-  for (let y = 0; y < height; y++) if (rowCnt[y] >= mr * 0.5) { if (y0 < 0) y0 = y; y1 = y; }
+  const found = findFrame();
+  if (found) ({ x0, x1, y0, y1 } = found);
+  else {
+    // fallback: projection of dark pixels (works when the picture is only the code itself)
+    const rowCnt = new Uint32Array(height), colCnt = new Uint32Array(width);
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        if (lum[y * width + x] < 80) { rowCnt[y]++; colCnt[x]++; }
+    let mr = 0, mc = 0;
+    for (let y = 0; y < height; y++) if (rowCnt[y] > mr) mr = rowCnt[y];
+    for (let x = 0; x < width; x++) if (colCnt[x] > mc) mc = colCnt[x];
+    if (mr < 20 || mc < 20) throw new Error('no code frame found');
+    for (let x = 0; x < width; x++) if (colCnt[x] >= mc * 0.5) { if (x0 < 0) x0 = x; x1 = x; }
+    for (let y = 0; y < height; y++) if (rowCnt[y] >= mr * 0.5) { if (y0 < 0) y0 = y; y1 = y; }
+  }
 
   // Sub-pixel frame edges: scan the mean luminance from the white margin inwards and
   // interpolate where it crosses mid-grey. A 1 px error in the frame size would drift
@@ -880,44 +1028,38 @@ function readCode(img) {
     const offs = [];
     for (const a of [-1, 0, 1]) for (const b of [-1, 0, 1]) offs.push([a * 0.15 * cellX, b * 0.15 * cellY]);
 
-    const sampleRGB = (row, col) => {
+    const sampleLum = (row, col) => {
       const cx = xl + (col + 1.5) * cellX, cy = yt + (row + 1.5) * cellY;
-      let R = 0, G = 0, B = 0;
+      let L = 0;
       for (const [dx, dy] of offs) {
         const px = Math.min(width - 1, Math.max(0, Math.floor(cx + dx)));
         const py = Math.min(height - 1, Math.max(0, Math.floor(cy + dy)));
         const i = (py * width + px) * 4;
-        R += data[i]; G += data[i + 1]; B += data[i + 2];
+        L += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
       }
-      return [R / offs.length, G / offs.length, B / offs.length];
+      return L / offs.length;
     };
 
-    // Calibration: average every cell of row 0 that carries the same tone
-    const ref = [0, 1, 2, 3].map(() => [0, 0, 0]);
-    const cnt = [0, 0, 0, 0];
-    for (let c = 0; c < CAL_CELLS; c++) {
-      const rgb = sampleRGB(0, c), t = c % 4;
-      for (let k = 0; k < 3; k++) ref[t][k] += rgb[k];
-      cnt[t]++;
-    }
-    for (let t = 0; t < 4; t++) for (let k = 0; k < 3; k++) ref[t][k] /= cnt[t];
+    // Calibration: average every cell of row 0 that carries the same level. Only brightness is
+    // used, so colour or grey, original or black-and-white copy, all read the same.
+    const ref = [0, 0, 0, 0], cnt = [0, 0, 0, 0];
+    for (let c = 0; c < CAL_CELLS; c++) { ref[c % 4] += sampleLum(0, c); cnt[c % 4]++; }
+    for (let t = 0; t < 4; t++) ref[t] /= cnt[t];
     for (let a = 0; a < 4; a++)
-      for (let b = a + 1; b < 4; b++) {
-        const d = Math.hypot(ref[a][0] - ref[b][0], ref[a][1] - ref[b][1], ref[a][2] - ref[b][2]);
-        if (d < 30) throw new Error('tones are too similar to tell apart. Try better lighting.');
-      }
+      for (let b = a + 1; b < 4; b++)
+        if (Math.abs(ref[a] - ref[b]) < 25) throw new Error('tones are too similar to tell apart. Try better lighting.');
 
-    const classify = ([R, G, B]) => {
+    const classify = L => {
       let best = 0, d1 = Infinity, d2 = Infinity;
-      for (let s = 0; s < 4; s++) {
-        const d = Math.hypot(R - ref[s][0], G - ref[s][1], B - ref[s][2]);
-        if (d < d1) { d2 = d1; d1 = d; best = s; }
+      for (let t = 0; t < 4; t++) {
+        const d = Math.abs(L - ref[t]);
+        if (d < d1) { d2 = d1; d1 = d; best = t; }
         else if (d < d2) d2 = d;
       }
       return { s: best, q: d2 > 0 ? d1 / d2 : 1 };
     };
 
-    return { readSym: k => classify(sampleRGB(1 + Math.floor(k / cols), k % cols)), rowsObs };
+    return { readSym: k => classify(sampleLum(1 + Math.floor(k / cols), k % cols)), rowsObs };
   }
   return { makeReader };
 }
