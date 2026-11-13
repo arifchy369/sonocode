@@ -9,7 +9,9 @@
     --bg: #f5f5f4; --panel: #fff; --ink: #18181b; --mute: #71717a;
     --line: #e4e4e7; --soft: #fafafa; --accent: #18181b; --focus: #2563eb; --rec: #e11d48;
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  button, label.btn, select, .icon-btn { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+  button:focus:not(:focus-visible), select:focus:not(:focus-visible), label.btn:focus:not(:focus-visible) { outline: none; }
   [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
@@ -76,6 +78,14 @@
 
   .status { font-size: 12.5px; color: var(--mute); white-space: pre-line; min-height: 18px; margin-top: 14px; }
   .status.err { color: var(--rec); }
+  .status.busy::before, .btn.loading::before {
+    content: ""; display: inline-block; width: 13px; height: 13px; margin-right: 8px; vertical-align: -2px;
+    border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: spin .7s linear infinite; will-change: transform;
+  }
+  .btn.loading { gap: 0; }
+  .btn.loading::before { margin-right: 8px; vertical-align: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   @media (max-width: 560px) {
     .panel { padding: 18px; }
@@ -248,11 +258,14 @@ const frameColor = (style, t) => style === 'classic' ? '#000' : rgbCss(yccRGB(26
 
 const $ = id => document.getElementById(id);
 const maxSec = () => Number($('maxDur').value) || DEFAULT_MAX_SEC;
-const setStatus = (id, msg, isErr = false) => {
+const setStatus = (id, msg, isErr = false, busy = false) => {
   const el = $(id);
   el.textContent = msg;
   el.classList.toggle('err', isErr);
+  el.classList.toggle('busy', busy);
 };
+// Let the browser paint the loading spinner before a heavy synchronous step starts.
+const nextPaint = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
 
 let ctx = null;
 const getCtx = () => ctx || (ctx = new (window.AudioContext || window.webkitAudioContext)());
@@ -546,7 +559,8 @@ function showInputInfo(buf, label) {
 }
 $('maxDur').onchange = () => { if (inBuffer) showInputInfo(inBuffer, inLabel); };
 async function loadFile(file) {
-  setStatus('inStatus', 'Decoding audio…');
+  setStatus('inStatus', 'Decoding audio…', false, true);
+  await nextPaint();
   try {
     inBuffer = await getCtx().decodeAudioData(await file.arrayBuffer());
     drawStatic($('inWave'), inBuffer.getChannelData(0));
@@ -616,6 +630,8 @@ async function finishRecording() {
   micStream.getTracks().forEach(t => t.stop());
   analyser.disconnect();
   setRecording(false);
+  setStatus('inStatus', 'Processing recording…', false, true);
+  await nextPaint();
   try {
     const blob = new Blob(chunks, { type: mediaRec.mimeType });
     inBuffer = await getCtx().decodeAudioData(await blob.arrayBuffer());
@@ -786,12 +802,16 @@ $('encodeBtn').onclick = async () => {
   if (!inBuffer) return;
   const bitrate = Number($('quality').value);
   $('encodeBtn').disabled = true;
-  setStatus('inStatus', 'Encoding…');
+  $('encodeBtn').classList.add('loading');
+  setStatus('inStatus', 'Encoding…', false, true);
+  await nextPaint();
   try {
     const sup = await AudioEncoder.isConfigSupported({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, bitrate });
     if (!sup.supported) throw new Error('this browser cannot encode Opus here');
 
     const { packets, n } = await encodeOpus(inBuffer, bitrate);
+    setStatus('inStatus', 'Building the image…', false, true);
+    await nextPaint();
     const { payload, streamLen, B } = buildPayload(packets, n);
 
     // Layout: row 0 = calibration (tones 0..3 repeated), data from row 1
@@ -885,6 +905,7 @@ $('encodeBtn').onclick = async () => {
   } catch (e) {
     setStatus('inStatus', 'Could not generate the code: ' + e.message, true);
   }
+  $('encodeBtn').classList.remove('loading');
   updateEncodeBtn();
 };
 
@@ -1199,9 +1220,12 @@ async function decodeImage(file) {
     setStatus('outStatus', 'This browser does not support Opus decoding (WebCodecs).', true);
     return;
   }
-  setStatus('outStatus', 'Reading image…');
+  setStatus('outStatus', 'Reading image…', false, true);
+  await nextPaint();
   try {
     const img = await loadImage(file);
+    setStatus('outStatus', 'Decoding sound…', false, true);
+    await nextPaint();
     const rc = readCode(img);
     const { rd, h } = locateLayout(rc);
     const { packets, totalSamples, missing, failedBlocks, erasedBytes, B } = parseBody(rd.readSym, h);
