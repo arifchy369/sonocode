@@ -8,7 +8,7 @@ Everything runs in your browser. Nothing is uploaded anywhere.
 
 ## How to use
 
-1. Open the live link (or `sonocode.html`) in a recent **Chrome or Edge** (it needs WebCodecs for Opus).
+1. Open the live link (or `index.html`) in a recent **Chrome or Edge** (it needs WebCodecs for Opus).
 2. **Sound → Code:** upload an audio file or record with the microphone. Pick the look, maximum duration (5 s – 60 s) and quality, then press **Generate code**. Save the PNG.
 3. **Code → Sound:** choose the PNG (or take a photo of a printed one). The sound is recovered and can be played or saved as WAV.
 
