@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonocode</title>
+<style>
+  :root {
+    --bg: #f5f5f4; --panel: #fff; --ink: #18181b; --mute: #71717a;
+    --line: #e4e4e7; --soft: #fafafa; --accent: #18181b; --focus: #2563eb; --rec: #e11d48;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Bengali", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header, main, footer { max-width: 960px; margin: 0 auto; padding-left: 24px; padding-right: 24px; }
+  header { padding-top: 44px; }
+  h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 6px; }
+  .lead { color: var(--mute); margin: 0; max-width: 680px; }
+  main { display: grid; gap: 20px; padding-top: 24px; padding-bottom: 48px; }
+  footer { padding-bottom: 40px; color: var(--mute); font-size: 12px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+  .panel-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+  .idx { font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+  h2 { font-size: 16px; font-weight: 600; margin: 0; }
+  .desc { color: var(--mute); font-size: 13px; margin: -6px 0 16px; }
+
+  .wave { border: 1px solid var(--line); border-radius: 10px; background: var(--soft); overflow: hidden; }
+  .wave canvas { display: block; width: 100%; height: 132px; }
+  .meta { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+          font-size: 12px; color: var(--mute); margin-top: 8px; font-variant-numeric: tabular-nums; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 16px; }
+  .spacer { flex: 1; }
+  .btn {
+    appearance: none; display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink);
+    padding: 9px 16px; border-radius: 8px; font: inherit; font-weight: 500; cursor: pointer;
+    transition: border-color .15s, background .15s, opacity .15s;
+  }
+  .btn:hover:not(:disabled) { border-color: #a1a1aa; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: #3f3f46; border-color: #3f3f46; }
+  .btn.rec { color: var(--rec); }
+  .btn.rec::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--rec); }
+  .btn.rec.active { background: var(--rec); border-color: var(--rec); color: #fff; }
+  .btn.rec.active::before { background: #fff; border-radius: 2px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  select {
+    appearance: none; padding: 9px 34px 9px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2371717a' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 12px center;
+    font: inherit; color: var(--ink); cursor: pointer;
+  }
+  .timer { font-variant-numeric: tabular-nums; color: var(--rec); font-size: 13px; min-width: 42px; }
+
+  .result { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line);
+            display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  #codeCanvas { max-width: 100%; height: auto; image-rendering: pixelated;
+                border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+
+  .player { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: #fff; }
+  .player .wave { border: none; background: var(--soft); border-radius: 8px; }
+  .transport { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  .time { font-variant-numeric: tabular-nums; color: var(--mute); font-size: 13px; }
+  .icon-btn {
+    width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--accent); color: #fff;
+    display: grid; place-items: center; cursor: pointer; font-size: 14px;
+  }
+  .icon-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .icon-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .status { font-size: 12.5px; color: var(--mute); white-space: pre-line; min-height: 18px; margin-top: 14px; }
+  .status.err { color: var(--rec); }
+
+  @media (max-width: 560px) {
+    .panel { padding: 18px; }
+    .toolbar > * { flex: 1 1 auto; justify-content: center; }
+    .spacer { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Sonocode</h1>
+  <p class="lead">
+    Sonocode turns a sound clip of up to 10 seconds into a printable image. Audio is compressed with Opus
+    in your browser, protected with Reed-Solomon error correction, and stored as four grey tones with a
+    calibration row. Each audio packet carries its own checksum, so a damaged part is concealed instead of
+    failing the whole clip.
+  </p>
+</header>
+
+<main>
+
+  <!-- 01 : Sound -> Code -->
+  <section class="panel">
+    <div class="panel-head">
+      <span class="idx">01</span>
+      <h2>Sound to Code</h2>
+    </div>
+    <p class="desc">Upload an audio file or record directly. Up to 10 seconds are used.</p>
+
+    <div class="wave"><canvas id="inWave"></canvas></div>
+    <div class="meta">
+      <span id="inInfo">No audio selected</span>
+      <span class="timer" id="timer"></span>
+    </div>
+
+    <div class="toolbar">
+      <label class="btn">
+        Upload file
+        <input type="file" id="audioFile" accept="audio/*" hidden>
+      </label>
+      <button class="btn rec" id="recBtn">Record</button>
+      <span class="spacer"></span>
+      <select id="quality" aria-label="Quality">
+        <option value="6000">Lowest · Opus 6 kbps</option>
+        <option value="10000">Low · Opus 10 kbps</option>
+        <option value="16000" selected>Standard · Opus 16 kbps</option>
+        <option value="24000">High · Opus 24 kbps</option>
+        <option value="32000">Max · Opus 32 kbps</option>
+      </select>
+      <button class="btn primary" id="encodeBtn" disabled>Generate code</button>
+    </div>
+
+    <div class="result" id="codeResult" hidden>
+      <canvas id="codeCanvas"></canvas>
+      <button class="btn" id="dlPng">Download PNG</button>
+    </div>
+    <div class="status" id="inStatus"></div>
+  </section>
+
+  <!-- 02 : Code -> Audio -->
+  <section class="panel">
+    <div class="panel-head">
+      <span class="idx">02</span>
+      <h2>Code to Audio</h2>
+    </div>
+    <p class="desc">Select a Sonocode image from your gallery, or capture one with the camera.</p>
+
+    <div class="toolbar" style="margin-top:0">
+      <label class="btn">
+        Gallery
+        <input type="file" id="codeGallery" accept="image/*" hidden>
+      </label>
+      <label class="btn">
+        Camera
+        <input type="file" id="codeCamera" accept="image/*" capture="environment" hidden>
+      </label>
+    </div>
+
+    <div class="player" style="margin-top:20px">
+      <div class="wave"><canvas id="outWave"></canvas></div>
+      <div class="transport">
+        <button class="icon-btn" id="playBtn" disabled aria-label="Play">&#9654;</button>
+        <span class="time" id="outTime">0.00 / 0.00 s</span>
+        <span class="spacer"></span>
+        <button class="btn" id="dlWav" disabled>Download WAV</button>
+      </div>
+    </div>
+    <div class="meta" id="outInfo"></div>
+    <div class="status" id="outStatus"></div>
+  </section>
+
+</main>
+
+<footer>Everything runs in your browser. No audio or image is uploaded anywhere.</footer>
+
+<script>
+// ============ Configuration ============
+const MAX_SEC = 10;          // longest clip used, in seconds
+const SR = 48000;            // Opus native rate
+const FRAME = 960;           // 20 ms Opus frame at 48 kHz
+const FRAME_US = 20000;      // frame duration in microseconds
+const MAX_PACKET = 1275;     // Opus maximum packet size
+
+const N = 255, NSYM = 32, K = N - NSYM;   // Reed-Solomon (255, 223): corrects 16 errors or 32 erasures per block
+const AMB_RATIO = 0.6;       // classification is "uncertain" when the two nearest tones are this close
+
+const MAGIC = [0x4F, 0x51];  // "OQ"
+const HDR_LEN = 12;          // MAGIC(2) totalSamples(4) packetCount(2) streamLen(4)
+const HDR_COPIES = 3;        // header is written three times and majority-voted
+
+const COLS = 256;            // cells per row
+const CELL = 5;              // grid pitch in pixels
+const DOT = 3;               // drawn dot size
+const PAD = 12;              // quiet zone in pixels
+
+// Four grey tones, well separated in luminance. Row 0 is a calibration row with these tones.
+const PALETTE = [
+  [24, 24, 24],     // 0 near-black
+  [92, 92, 92],     // 1 dark grey
+  [168, 168, 168],  // 2 light grey
+  [246, 246, 246]   // 3 near-white
+];
+const CSS_PALETTE = PALETTE.map(([r, g, b]) => `rgb(${r},${g},${b})`);
+
+const $ = id => document.getElementById(id);
+const setStatus = (id, msg, isErr = false) => {
+  const el = $(id);
+  el.textContent = msg;
+  el.classList.toggle('err', isErr);
+};
+
+let ctx = null;
+const getCtx = () => ctx || (ctx = new (window.AudioContext || window.webkitAudioContext)());
+
+const OPUS_SUPPORTED = typeof AudioEncoder !== 'undefined' && typeof AudioDecoder !== 'undefined';
+
+// ============ Bytes, checksums ============
+const CRC32_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (const b of bytes) c = CRC32_TABLE[(c ^ b) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function crc16(bytes) {
+  let c = 0xFFFF;
+  for (const b of bytes) {
+    c ^= b << 8;
+    for (let k = 0; k < 8; k++) c = (c & 0x8000) ? (((c << 1) ^ 0x1021) & 0xFFFF) : ((c << 1) & 0xFFFF);
+  }
+  return c;
+}
+function put32(a, o, v) {
+  a[o] = (v >>> 24) & 255; a[o + 1] = (v >>> 16) & 255;
+  a[o + 2] = (v >>> 8) & 255; a[o + 3] = v & 255;
+}
+function u32(a, o) { return ((a[o] << 24) >>> 0) + (a[o + 1] << 16) + (a[o + 2] << 8) + a[o + 3]; }
+
+// Bytes -> 2-bit symbols (4 per byte, most significant first)
+function bytesToSymbols(bytes) {
+  const s = new Uint8Array(bytes.length * 4);
+  for (let i = 0; i < bytes.length; i++)
+    for (let j = 0; j < 4; j++) s[i * 4 + j] = (bytes[i] >> (6 - 2 * j)) & 3;
+  return s;
+}
+
+// ============ GF(256) arithmetic, Reed-Solomon ============
+const GF_EXP = new Uint8Array(512);
+const GF_LOG = new Uint8Array(256);
+(() => {
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    GF_EXP[i] = x;
+    GF_LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11D;
+  }
+  for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+})();
+const gfMul = (a, b) => (a && b) ? GF_EXP[GF_LOG[a] + GF_LOG[b]] : 0;
+const gfInv = a => GF_EXP[255 - GF_LOG[a]];
+const gfPow = (a, e) => {
+  if (e === 0) return 1;
+  if (a === 0) return 0;
+  return GF_EXP[(GF_LOG[a] * e) % 255];
+};
+
+// Generator polynomial, highest degree first: product of (x - 2^i) for i < NSYM
+const RS_GEN = (() => {
+  let g = [1];
+  for (let i = 0; i < NSYM; i++) {
+    const f = [1, gfPow(2, i)];
+    const r = new Array(g.length + 1).fill(0);
+    for (let a = 0; a < g.length; a++)
+      for (let b = 0; b < 2; b++) r[a + b] ^= gfMul(g[a], f[b]);
+    g = r;
+  }
+  return g;
+})();
+
+// Systematic encode: returns K data bytes followed by NSYM parity bytes
+function rsEncode(msg) {
+  const out = new Uint8Array(msg.length + NSYM);
+  out.set(msg);
+  for (let i = 0; i < msg.length; i++) {
+    const coef = out[i];
+    if (coef !== 0)
+      for (let j = 1; j < RS_GEN.length; j++) out[i + j] ^= gfMul(RS_GEN[j], coef);
+  }
+  const res = new Uint8Array(msg.length + NSYM);
+  res.set(msg);
+  res.set(out.subarray(msg.length), msg.length);
+  return res;
+}
+
+// Polynomial helpers
+// "HF" = highest degree first, "LF" = lowest degree first
+function evalHF(p, x) {
+  let y = 0;
+  for (const c of p) y = gfMul(y, x) ^ c;
+  return y;
+}
+function evalLF(p, x) {
+  let y = 0, xp = 1;
+  for (let i = 0; i < p.length; i++) { y ^= gfMul(p[i], xp); xp = gfMul(xp, x); }
+  return y;
+}
+function mulLF(a, b) {
+  const r = new Array(a.length + b.length - 1).fill(0);
+  for (let i = 0; i < a.length; i++)
+    for (let j = 0; j < b.length; j++) r[i + j] ^= gfMul(a[i], b[j]);
+  return r;
+}
+function trimLF(p) {
+  const r = p.slice();
+  while (r.length > 1 && r[r.length - 1] === 0) r.pop();
+  return r;
+}
+
+// Berlekamp-Massey on a syndrome sequence; returns the error locator (LF)
+function berlekampMassey(s) {
+  let C = [1], B = [1], L = 0, m = 1, b = 1;
+  for (let n = 0; n < s.length; n++) {
+    let d = s[n];
+    for (let i = 1; i <= L; i++) d ^= gfMul(C[i] || 0, s[n - i]);
+    if (d === 0) { m++; continue; }
+    const T = C.slice();
+    const coef = gfMul(d, gfInv(b));
+    while (C.length < B.length + m) C.push(0);
+    for (let i = 0; i < B.length; i++) C[i + m] ^= gfMul(coef, B[i]);
+    if (2 * L <= n) { L = n + 1 - L; B = T; b = d; m = 1; }
+    else m++;
+  }
+  return trimLF(C);
+}
+
+// Gauss-Jordan over GF(256); A is m rows of (m unknowns + 1 constant)
+function solveGF(A) {
+  const m = A.length;
+  for (let col = 0; col < m; col++) {
+    let piv = -1;
+    for (let r = col; r < m; r++) if (A[r][col]) { piv = r; break; }
+    if (piv < 0) return null;
+    [A[col], A[piv]] = [A[piv], A[col]];
+    const inv = gfInv(A[col][col]);
+    for (let c = col; c <= m; c++) A[col][c] = gfMul(A[col][c], inv);
+    for (let r = 0; r < m; r++) {
+      if (r !== col && A[r][col]) {
+        const f = A[r][col];
+        for (let c = col; c <= m; c++) A[r][c] ^= gfMul(f, A[col][c]);
+      }
+    }
+  }
+  return A.map(row => row[m]);
+}
+
+// Decode one codeword. erasures = positions known to be unreliable.
+// Returns the K data bytes, or null when the block cannot be corrected.
+function rsDecode(cw, erasures) {
+  const c = cw.slice();
+  for (const p of erasures) c[p] = 0;
+
+  const S = [];
+  let clean = true;
+  for (let i = 0; i < NSYM; i++) {
+    S[i] = evalHF(c, gfPow(2, i));
+    if (S[i]) clean = false;
+  }
+  if (clean) return c.subarray(0, K);
+  if (erasures.length > NSYM) return null;
+
+  const E = erasures.length;
+  // Erasure locator, LF: product of (1 + X z), with X = 2^(N-1-p)
+  let gamma = [1];
+  for (const p of erasures) gamma = mulLF(gamma, [1, gfPow(2, N - 1 - p)]);
+
+  // Forney syndromes for the unknown errors
+  const T = [];
+  for (let j = E; j < NSYM; j++) {
+    let v = 0;
+    for (let i = 0; i < gamma.length && i <= j; i++) v ^= gfMul(gamma[i], S[j - i]);
+    T.push(v);
+  }
+  const sigma = berlekampMassey(T);
+  const t = sigma.length - 1;
+  if (2 * t + E > NSYM) return null;
+
+  // Full errata locator and its roots (Chien search)
+  const lam = trimLF(mulLF(sigma, gamma));
+  const deg = lam.length - 1;
+  const pos = [];
+  for (let p = 0; p < N; p++) {
+    const z = gfInv(gfPow(2, N - 1 - p));
+    if (evalLF(lam, z) === 0) pos.push(p);
+  }
+  if (pos.length !== deg) return null;
+
+  // Error magnitudes from a Vandermonde system: sum_k e_k X_k^i = S_i
+  const m = pos.length;
+  const A = [];
+  for (let i = 0; i < m; i++) {
+    const row = pos.map(p => gfPow(2, N - 1 - p) === 0 ? 0 : gfPow(gfPow(2, N - 1 - p), i));
+    row.push(S[i]);
+    A.push(row);
+  }
+  const mags = solveGF(A);
+  if (!mags) return null;
+  for (let k = 0; k < m; k++) c[pos[k]] ^= mags[k];
+
+  // Verify
+  for (let i = 0; i < NSYM; i++) if (evalHF(c, gfPow(2, i))) return null;
+  return c.subarray(0, K);
+}
+
+// ============ WAV export (16-bit) ============
+function makeWav(samples, sr) {
+  const data = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++)
+    data[i] = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+  const h = new DataView(new ArrayBuffer(44));
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) h.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); h.setUint32(4, 36 + data.byteLength, true); w(8, 'WAVE');
+  w(12, 'fmt '); h.setUint32(16, 16, true);
+  h.setUint16(20, 1, true); h.setUint16(22, 1, true);
+  h.setUint32(24, sr, true); h.setUint32(28, sr * 2, true);
+  h.setUint16(32, 2, true); h.setUint16(34, 16, true);
+  w(36, 'data'); h.setUint32(40, data.byteLength, true);
+  return new Blob([h, data.buffer], { type: 'audio/wav' });
+}
+
+// ============ Waveform drawing ============
+const COLORS = { ink: '#52525b', accent: '#18181b', rec: '#e11d48', line: '#e4e4e7', play: '#2563eb' };
+function fit(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h };
+}
+function drawStatic(cv, data, progress = -1) {
+  const { g, w, h } = fit(cv);
+  const mid = h / 2, amp = mid * 0.9, n = data.length, per = n / w;
+  g.fillStyle = COLORS.line;
+  g.fillRect(0, mid, w, 1);
+  for (let x = 0; x < w; x++) {
+    const s = Math.floor(x * per), e = Math.max(s + 1, Math.floor((x + 1) * per));
+    let lo = 1, hi = -1;
+    for (let i = s; i < e && i < n; i++) {
+      const v = data[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (hi < lo) { lo = 0; hi = 0; }
+    g.fillStyle = (progress >= 0 && x / w < progress) ? COLORS.play : COLORS.ink;
+    g.fillRect(x, mid - hi * amp, 1, Math.max(1, (hi - lo) * amp));
+  }
+  if (progress >= 0) {
+    g.fillStyle = COLORS.accent;
+    g.fillRect(Math.min(w - 1, progress * w), 0, 1.5, h);
+  }
+}
+function drawLive(cv, analyser) {
+  const { g, w, h } = fit(cv);
+  const buf = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buf);
+  g.fillStyle = COLORS.line;
+  g.fillRect(0, h / 2, w, 1);
+  g.beginPath();
+  for (let i = 0; i < buf.length; i++) {
+    const x = (i / (buf.length - 1)) * w;
+    const y = h / 2 + ((buf[i] - 128) / 128) * (h / 2) * 0.9;
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.strokeStyle = COLORS.rec;
+  g.lineWidth = 1.5;
+  g.stroke();
+}
+
+// ============ Section 01 : Sound -> Code ============
+let inBuffer = null;
+let codeBlob = null;
+
+const updateEncodeBtn = () => {
+  $('encodeBtn').disabled = !OPUS_SUPPORTED || !inBuffer || (mediaRec && mediaRec.state === 'recording');
+};
+function showInputInfo(buf, label) {
+  const extra = buf.duration > MAX_SEC ? ` · only first ${MAX_SEC} s will be used` : '';
+  $('inInfo').textContent = `${label} · ${buf.duration.toFixed(2)} s${extra}`;
+}
+async function loadFile(file) {
+  setStatus('inStatus', 'Decoding audio…');
+  try {
+    inBuffer = await getCtx().decodeAudioData(await file.arrayBuffer());
+    drawStatic($('inWave'), inBuffer.getChannelData(0));
+    showInputInfo(inBuffer, file.name);
+    $('codeResult').hidden = true;
+    setStatus('inStatus', 'Audio ready. Generate the code.');
+  } catch (e) {
+    inBuffer = null;
+    setStatus('inStatus', 'This audio format could not be decoded.', true);
+  }
+  updateEncodeBtn();
+}
+$('audioFile').onchange = e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) loadFile(file);
+};
+
+// ---- Live recording ----
+let mediaRec = null, micStream = null, analyser = null, chunks = [];
+let recStart = 0, recTimeout = 0, liveRaf = 0;
+
+function setRecording(on) {
+  $('recBtn').classList.toggle('active', on);
+  $('recBtn').textContent = on ? 'Stop' : 'Record';
+  $('audioFile').disabled = on;
+  $('quality').disabled = on;
+  $('timer').textContent = on ? '0.0 s' : '';
+  updateEncodeBtn();
+}
+function liveTick() {
+  drawLive($('inWave'), analyser);
+  $('timer').textContent = ((performance.now() - recStart) / 1000).toFixed(1) + ' s';
+  liveRaf = requestAnimationFrame(liveTick);
+}
+async function startRecording() {
+  getCtx().resume();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus('inStatus', 'Microphone access was denied.', true);
+    return;
+  }
+  const c = getCtx();
+  analyser = c.createAnalyser();
+  analyser.fftSize = 2048;
+  c.createMediaStreamSource(micStream).connect(analyser);
+  chunks = [];
+  mediaRec = new MediaRecorder(micStream);
+  mediaRec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mediaRec.onstop = finishRecording;
+  mediaRec.start();
+  recStart = performance.now();
+  setRecording(true);
+  setStatus('inStatus', `Recording… stops automatically after ${MAX_SEC} seconds.`);
+  liveTick();
+  recTimeout = setTimeout(stopRecording, MAX_SEC * 1000);
+}
+function stopRecording() {
+  clearTimeout(recTimeout);
+  if (mediaRec && mediaRec.state !== 'inactive') mediaRec.stop();
+}
+async function finishRecording() {
+  cancelAnimationFrame(liveRaf);
+  micStream.getTracks().forEach(t => t.stop());
+  analyser.disconnect();
+  setRecording(false);
+  try {
+    const blob = new Blob(chunks, { type: mediaRec.mimeType });
+    inBuffer = await getCtx().decodeAudioData(await blob.arrayBuffer());
+    drawStatic($('inWave'), inBuffer.getChannelData(0));
+    showInputInfo(inBuffer, 'Recording');
+    $('codeResult').hidden = true;
+    setStatus('inStatus', 'Recording complete. Generate the code.');
+  } catch (e) {
+    inBuffer = null;
+    setStatus('inStatus', 'The recording could not be processed.', true);
+  }
+  updateEncodeBtn();
+}
+$('recBtn').onclick = () => {
+  if (mediaRec && mediaRec.state === 'recording') stopRecording();
+  else startRecording();
+};
+
+// ============ Opus encode / decode (WebCodecs) ============
+async function encodeOpus(buffer, bitrate) {
+  const n = Math.max(1, Math.floor(Math.min(buffer.duration, MAX_SEC) * SR));
+  const frames = Math.ceil(n / FRAME);
+
+  const off = new OfflineAudioContext(1, frames * FRAME, SR);
+  const srcNode = off.createBufferSource();
+  srcNode.buffer = buffer;
+  srcNode.connect(off.destination);
+  srcNode.start(0);
+  const f = (await off.startRendering()).getChannelData(0);
+
+  let pk = 0;
+  for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(f[i]));
+  if (pk > 0) for (let i = 0; i < f.length; i++) f[i] /= pk;
+
+  const packets = [];
+  let encError = null;
+  const enc = new AudioEncoder({
+    output: chunk => {
+      const b = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(b);
+      packets.push(b);
+    },
+    error: e => { encError = e; }
+  });
+  enc.configure({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, bitrate });
+  for (let i = 0; i < frames; i++) {
+    const ad = new AudioData({
+      format: 'f32', sampleRate: SR, numberOfFrames: FRAME, numberOfChannels: 1,
+      timestamp: i * FRAME_US, data: f.slice(i * FRAME, (i + 1) * FRAME)
+    });
+    enc.encode(ad);
+    ad.close();
+  }
+  await enc.flush();
+  enc.close();
+  if (encError) throw new Error('Opus encoder: ' + encError.message);
+
+  return { packets, n };
+}
+
+// Packet framing: seq(2) len(2) data(len) crc16(2), crc over seq+len+data
+function framePackets(packets) {
+  const parts = [];
+  let total = 0;
+  packets.forEach((p, seq) => {
+    const body = new Uint8Array(4 + p.length);
+    body[0] = (seq >> 8) & 255; body[1] = seq & 255;
+    body[2] = (p.length >> 8) & 255; body[3] = p.length & 255;
+    body.set(p, 4);
+    const c = crc16(body);
+    const frame = new Uint8Array(body.length + 2);
+    frame.set(body, 0);
+    frame[body.length] = (c >> 8) & 255;
+    frame[body.length + 1] = c & 255;
+    parts.push(frame);
+    total += frame.length;
+  });
+  const stream = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { stream.set(p, o); o += p.length; }
+  return stream;
+}
+
+// Byte-level layout: header copies, then Reed-Solomon blocks interleaved byte-by-byte.
+// Transmitted byte at index i*B + b is byte i of block b, so a burst of damage
+// is spread across many blocks.
+function buildPayload(packets, totalSamples) {
+  const stream = framePackets(packets);
+  const streamLen = stream.length;
+  const B = Math.ceil(streamLen / K);
+  const padded = new Uint8Array(B * K);
+  padded.set(stream);
+
+  const T = new Uint8Array(N * B);
+  for (let b = 0; b < B; b++) {
+    const msg = new Uint8Array(K);
+    for (let i = 0; i < K; i++) msg[i] = padded[i * B + b];
+    const cw = rsEncode(msg);
+    for (let i = 0; i < N; i++) T[i * B + b] = cw[i];
+  }
+
+  const hdr = new Uint8Array(HDR_LEN);
+  hdr[0] = MAGIC[0]; hdr[1] = MAGIC[1];
+  put32(hdr, 2, totalSamples);
+  hdr[6] = (packets.length >> 8) & 255; hdr[7] = packets.length & 255;
+  put32(hdr, 8, streamLen);
+
+  const payload = new Uint8Array(HDR_LEN * HDR_COPIES + T.length);
+  for (let c = 0; c < HDR_COPIES; c++) payload.set(hdr, c * HDR_LEN);
+  payload.set(T, HDR_LEN * HDR_COPIES);
+  return { payload, streamLen, B };
+}
+
+// Decodes Opus packets back to PCM. Missing packets become silence of one frame.
+async function decodeOpus(packets, totalSamples) {
+  const pcm = new Float32Array(packets.length * FRAME);
+  let decError = null;
+  const dec = new AudioDecoder({
+    output: ad => {
+      const idx = Math.round(ad.timestamp / FRAME_US);
+      const plane = new Float32Array(ad.numberOfFrames);
+      ad.copyTo(plane, { planeIndex: 0, format: 'f32-planar' });
+      ad.close();
+      if (idx >= 0 && idx < packets.length) {
+        const m = Math.min(FRAME, plane.length);
+        pcm.set(plane.subarray(0, m), idx * FRAME);
+      }
+    },
+    error: e => { decError = e; }
+  });
+  dec.configure({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, description: opusHead() });
+  packets.forEach((p, seq) => {
+    if (p) dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: seq * FRAME_US, data: p }));
+  });
+  await dec.flush();
+  dec.close();
+  if (decError) throw new Error('Opus decoder: ' + decError.message);
+  return pcm.subarray(0, Math.min(totalSamples, pcm.length));
+}
+
+function opusHead() {
+  const b = new ArrayBuffer(19);
+  const v = new DataView(b);
+  const id = 'OpusHead';
+  for (let i = 0; i < 8; i++) v.setUint8(i, id.charCodeAt(i));
+  v.setUint8(8, 1);
+  v.setUint8(9, 1);
+  v.setUint16(10, 312, true);
+  v.setUint32(12, SR, true);
+  v.setInt16(16, 0, true);
+  v.setUint8(18, 0);
+  return b;
+}
+
+// ---- Encode button ----
+$('encodeBtn').onclick = async () => {
+  if (!inBuffer) return;
+  const bitrate = Number($('quality').value);
+  $('encodeBtn').disabled = true;
+  setStatus('inStatus', 'Encoding…');
+  try {
+    const sup = await AudioEncoder.isConfigSupported({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, bitrate });
+    if (!sup.supported) throw new Error('this browser cannot encode Opus here');
+
+    const { packets, n } = await encodeOpus(inBuffer, bitrate);
+    const { payload, streamLen, B } = buildPayload(packets, n);
+
+    // Layout: row 0 = calibration (cols 0..3 = tones 0..3), data from row 1
+    const syms = bytesToSymbols(payload);
+    const rows = 1 + Math.ceil(syms.length / COLS);
+    if (rows > 5000) throw new Error('clip too large for one image. Choose a lower quality.');
+
+    const gw = COLS + 2, gh = rows + 2;
+    const cv = $('codeCanvas');
+    cv.width = gw * CELL + PAD * 2;
+    cv.height = gh * CELL + PAD * 2;
+    const g = cv.getContext('2d');
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, cv.width, cv.height);
+
+    const cellXY = (row, col) => [PAD + (col + 1) * CELL, PAD + (row + 1) * CELL];
+    const fillCell = (row, col, colour) => {
+      const [x, y] = cellXY(row, col);
+      const inset = (CELL - DOT) / 2;
+      g.fillStyle = colour;
+      g.fillRect(x + inset, y + inset, DOT, DOT);
+    };
+
+    g.fillStyle = '#000';
+    g.fillRect(PAD, PAD, gw * CELL, CELL);
+    g.fillRect(PAD, PAD + (gh - 1) * CELL, gw * CELL, CELL);
+    g.fillRect(PAD, PAD, CELL, gh * CELL);
+    g.fillRect(PAD + (gw - 1) * CELL, PAD, CELL, gh * CELL);
+
+    for (let c = 0; c < 4; c++) fillCell(0, c, CSS_PALETTE[c]);
+    for (let k = 0; k < syms.length; k++)
+      fillCell(1 + Math.floor(k / COLS), k % COLS, CSS_PALETTE[syms[k]]);
+
+    codeBlob = await new Promise(res => cv.toBlob(res, 'image/png'));
+    $('codeResult').hidden = false;
+    setStatus('inStatus',
+      `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · 4 grey tones\n` +
+      `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${cv.width}×${cv.height} px`);
+  } catch (e) {
+    setStatus('inStatus', 'Could not generate the code: ' + e.message, true);
+  }
+  updateEncodeBtn();
+};
+
+$('dlPng').onclick = () => {
+  if (!codeBlob) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(codeBlob);
+  a.download = 'sonocode.png';
+  a.click();
+};
+
+// ============ Section 02 : Code -> Audio ============
+let out = null;   // { samples: Float32Array, sr, duration }
+let playSrc = null, playing = false, startAt = 0, offset = 0, outRaf = 0;
+
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => rej(new Error('image could not be loaded'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// Reads tone symbols from the image. Returns readSym(k) = tone | (uncertain ? 4 : 0).
+function readCode(img) {
+  const scale = Math.min(1, 16000 / Math.max(img.naturalWidth, img.naturalHeight));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(img.naturalWidth * scale);
+  cv.height = Math.round(img.naturalHeight * scale);
+  const g = cv.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0, cv.width, cv.height);
+  const { data, width, height } = g.getImageData(0, 0, cv.width, cv.height);
+
+  const isDark = (x, y) => {
+    const i = (y * width + x) * 4;
+    return data[i + 3] > 128 && data[i] < 60 && data[i + 1] < 60 && data[i + 2] < 60;
+  };
+
+  let x0 = width, y0 = height, x1 = -1, y1 = -1;
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++)
+      if (isDark(x, y)) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+  if (x1 < 0) throw new Error('no code frame found');
+
+  const cell = (x1 - x0 + 1) / (COLS + 2);
+  const r = cell * 0.2;
+
+  const sampleRGB = (row, col) => {
+    const cx = x0 + (col + 1.5) * cell, cy = y0 + (row + 1.5) * cell;
+    const pts = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
+    let R = 0, G = 0, B = 0;
+    for (const [dx, dy] of pts) {
+      const px = Math.min(width - 1, Math.max(0, Math.floor(cx + dx)));
+      const py = Math.min(height - 1, Math.max(0, Math.floor(cy + dy)));
+      const i = (py * width + px) * 4;
+      R += data[i]; G += data[i + 1]; B += data[i + 2];
+    }
+    return [R / pts.length, G / pts.length, B / pts.length];
+  };
+
+  // Calibration from row 0
+  const ref = [0, 1, 2, 3].map(c => sampleRGB(0, c));
+  for (let a = 0; a < 4; a++)
+    for (let b = a + 1; b < 4; b++) {
+      const d = Math.hypot(ref[a][0] - ref[b][0], ref[a][1] - ref[b][1], ref[a][2] - ref[b][2]);
+      if (d < 40) throw new Error('tones are too similar to tell apart. Try better lighting.');
+    }
+
+  const classify = ([R, G, B]) => {
+    let best = 0, d1 = Infinity, d2 = Infinity;
+    for (let s = 0; s < 4; s++) {
+      const d = Math.hypot(R - ref[s][0], G - ref[s][1], B - ref[s][2]);
+      if (d < d1) { d2 = d1; d1 = d; best = s; }
+      else if (d < d2) d2 = d;
+    }
+    const uncertain = d1 > AMB_RATIO * d2;
+    return best | (uncertain ? 4 : 0);
+  };
+
+  const readSym = k => classify(sampleRGB(1 + Math.floor(k / COLS), k % COLS));
+  return { readSym };
+}
+
+// Reads byte i from 4 symbols; the byte is "erased" if any symbol is uncertain.
+function makeByteReader(readSym) {
+  return i => {
+    let v = 0, er = false;
+    for (let j = 0; j < 4; j++) {
+      const code = readSym(i * 4 + j);
+      v = (v << 2) | (code & 3);
+      if (code & 4) er = true;
+    }
+    return { v, er };
+  };
+}
+
+function mode(values) {
+  const count = new Map();
+  for (const v of values) count.set(v, (count.get(v) || 0) + 1);
+  let best = values[0], bc = 0;
+  for (const [v, c] of count) if (c > bc) { bc = c; best = v; }
+  return best;
+}
+
+function parseCode(readSym) {
+  const readByte = makeByteReader(readSym);
+
+  // Header: majority vote over the copies that are not uncertain
+  const hdr = new Uint8Array(HDR_LEN);
+  for (let f = 0; f < HDR_LEN; f++) {
+    const votes = [];
+    for (let c = 0; c < HDR_COPIES; c++) {
+      const r = readByte(c * HDR_LEN + f);
+      if (!r.er) votes.push(r.v);
+    }
+    if (!votes.length) throw new Error('header is unreadable');
+    hdr[f] = mode(votes);
+  }
+  if (hdr[0] !== MAGIC[0] || hdr[1] !== MAGIC[1])
+    throw new Error('this image is not a Sonocode, or it is too unclear');
+
+  const totalSamples = u32(hdr, 2);
+  const packetCount = (hdr[6] << 8) | hdr[7];
+  const streamLen = u32(hdr, 8);
+  if (totalSamples <= 0 || totalSamples > SR * MAX_SEC + FRAME) throw new Error('corrupt header (length)');
+  if (packetCount <= 0 || packetCount > 10000) throw new Error('corrupt header (packet count)');
+  if (streamLen <= 0 || streamLen > 1000000) throw new Error('corrupt header (size)');
+
+  // Reed-Solomon blocks
+  const B = Math.ceil(streamLen / K);
+  const base = HDR_LEN * HDR_COPIES;
+  const stream = new Uint8Array(B * K);
+  let failedBlocks = 0, erasedBytes = 0;
+  for (let b = 0; b < B; b++) {
+    const cw = new Uint8Array(N);
+    const erasures = [];
+    for (let i = 0; i < N; i++) {
+      const r = readByte(base + i * B + b);
+      cw[i] = r.v;
+      if (r.er) { erasures.push(i); erasedBytes++; }
+    }
+    const msg = rsDecode(cw, erasures);
+    if (!msg) { failedBlocks++; continue; }
+    for (let i = 0; i < K; i++) stream[i * B + b] = msg[i];
+  }
+
+  // Packets: each one is checked by its own CRC; damaged ones are skipped
+  const packets = new Array(packetCount).fill(null);
+  let good = 0, bad = 0, pos = 0;
+  while (pos + 6 <= streamLen && good + bad < packetCount + 4) {
+    const seq = (stream[pos] << 8) | stream[pos + 1];
+    const len = (stream[pos + 2] << 8) | stream[pos + 3];
+    if (len <= 0 || len > MAX_PACKET || pos + 6 + len > streamLen) break;
+    const body = stream.subarray(pos, pos + 4 + len);
+    const crc = (stream[pos + 4 + len] << 8) | stream[pos + 5 + len];
+    if (crc16(body) === crc && seq < packetCount && !packets[seq]) {
+      packets[seq] = stream.slice(pos + 4, pos + 4 + len);
+      good++;
+    } else bad++;
+    pos += 6 + len;
+  }
+
+  return { packets, totalSamples, good, missing: packetCount - good, failedBlocks, erasedBytes, B };
+}
+
+async function decodeImage(file) {
+  stopPlayback(false);
+  if (!OPUS_SUPPORTED) {
+    setStatus('outStatus', 'This browser does not support Opus decoding (WebCodecs).', true);
+    return;
+  }
+  setStatus('outStatus', 'Reading image…');
+  try {
+    const img = await loadImage(file);
+    const { readSym } = readCode(img);
+    const { packets, totalSamples, missing, failedBlocks, erasedBytes, B } = parseCode(readSym);
+
+    const samples = await decodeOpus(packets, totalSamples);
+    out = { samples, sr: SR, duration: samples.length / SR };
+
+    $('playBtn').disabled = false;
+    $('dlWav').disabled = false;
+    offset = 0;
+    drawStatic($('outWave'), samples, 0);
+    updateTime(0);
+    $('outInfo').textContent = `${SR} Hz · Opus · ${out.duration.toFixed(2)} s · ${packets.length} packets`;
+
+    const notes = [];
+    notes.push(`RS blocks: ${B} · uncertain bytes: ${erasedBytes} · unrecoverable blocks: ${failedBlocks}`);
+    if (missing > 0) notes.push(`Missing packets concealed with silence: ${missing}`);
+    const bad = failedBlocks > 0 || missing > 0;
+    setStatus('outStatus', (bad ? 'Partially recovered.\n' : 'Recovered.\n') + notes.join('\n'), bad);
+  } catch (e) {
+    setStatus('outStatus', 'Could not decode: ' + e.message, true);
+  }
+}
+
+['codeGallery', 'codeCamera'].forEach(id => {
+  $(id).onchange = e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) decodeImage(file);
+  };
+});
+
+// ---- Playback (Web Audio only) ----
+function position() {
+  return playing ? Math.min(out.duration, getCtx().currentTime - startAt) : offset;
+}
+function updateTime(t) {
+  $('outTime').textContent = `${t.toFixed(2)} / ${out ? out.duration.toFixed(2) : '0.00'} s`;
+}
+function drawOut() {
+  if (!out) return;
+  const p = position();
+  drawStatic($('outWave'), out.samples, p / out.duration);
+  updateTime(p);
+  $('playBtn').innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
+  $('playBtn').setAttribute('aria-label', playing ? 'Pause' : 'Play');
+  if (playing) outRaf = requestAnimationFrame(drawOut);
+}
+function startPlayback(t) {
+  stopPlayback(false);
+  const c = getCtx();
+  c.resume();
+  const buf = c.createBuffer(1, out.samples.length, out.sr);
+  buf.copyToChannel(out.samples, 0);
+  const node = c.createBufferSource();
+  node.buffer = buf;
+  node.connect(c.destination);
+  node.onended = () => {
+    if (playSrc !== node) return;
+    playing = false;
+    offset = 0;
+    playSrc = null;
+    cancelAnimationFrame(outRaf);
+    drawOut();
+  };
+  startAt = c.currentTime - t;
+  offset = t;
+  node.start(0, t);
+  playSrc = node;
+  playing = true;
+  drawOut();
+}
+function stopPlayback(keepPosition = true) {
+  if (!playSrc) return;
+  const p = position();
+  const node = playSrc;
+  playSrc = null;
+  node.onended = null;
+  try { node.stop(); } catch (e) {}
+  playing = false;
+  if (keepPosition) offset = p;
+  cancelAnimationFrame(outRaf);
+}
+$('playBtn').onclick = () => {
+  if (!out) return;
+  if (playing) { stopPlayback(true); drawOut(); }
+  else startPlayback(offset >= out.duration - 0.01 ? 0 : offset);
+};
+$('outWave').style.cursor = 'pointer';
+$('outWave').onclick = e => {
+  if (!out) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const t = ((e.clientX - rect.left) / rect.width) * out.duration;
+  if (playing) startPlayback(t);
+  else { offset = t; drawOut(); }
+};
+$('dlWav').onclick = () => {
+  if (!out) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(makeWav(out.samples, out.sr));
+  a.download = 'sonocode-audio.wav';
+  a.click();
+};
+
+// ---- Startup ----
+if (!OPUS_SUPPORTED) {
+  setStatus('inStatus', 'This browser does not support WebCodecs (Opus). Use a recent Chrome or Edge.', true);
+}
+updateEncodeBtn();
+drawStatic($('inWave'), new Float32Array(0));
+drawStatic($('outWave'), new Float32Array(0));
+</script>
+</body>
+</html>
