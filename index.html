@@ -181,16 +181,21 @@ const FRAME_US = 20000;      // frame duration in microseconds
 const MAX_PACKET = 1275;     // Opus maximum packet size
 
 const N = 255, NSYM = 32, K = N - NSYM;   // Reed-Solomon (255, 223): corrects 16 errors or 32 erasures per block
-const AMB_RATIO = 0.6;       // classification is "uncertain" when the two nearest tones are this close
+const AMB_RATIO = 0.7;       // a byte is flagged "uncertain" when its two nearest tones are this close
 
 const MAGIC = [0x4F, 0x51];  // "OQ"
 const HDR_LEN = 12;          // MAGIC(2) totalSamples(4) packetCount(2) streamLen(4)
-const HDR_COPIES = 3;        // header is written three times and majority-voted
+const HDR_COPIES = 5;        // header is written five times and voted symbol by symbol
 
-const COLS = 256;            // cells per row
-const CELL = 5;              // grid pitch in pixels
-const DOT = 3;               // drawn dot size
-const PAD = 12;              // quiet zone in pixels
+// The grid is kept close to square so that chat apps (Messenger etc.) which shrink the longest
+// side do not squash the cells. The column count is chosen per image from this list; the reader
+// tries each candidate and validates it against the header and the image height.
+const COLS_CANDIDATES = [];
+for (let c = 100; c <= 440; c += 10) COLS_CANDIDATES.push(c);
+const CAL_CELLS = 40;        // calibration row: tones 0,1,2,3 repeated over the first 40 cells
+const TARGET_PX = 2000;      // aim for an image no larger than this on its longest side
+const CELL_MIN = 5, CELL_MAX = 12;   // cell size in pixels (cells are fully filled, no gaps)
+const PAD = 24;              // quiet zone in pixels
 
 // Four grey tones, well separated in luminance. Row 0 is a calibration row with these tones.
 const PALETTE = [
@@ -678,6 +683,14 @@ function buildPayload(packets, totalSamples) {
   return { payload, streamLen, B };
 }
 
+// Picks the column count that makes the grid closest to square.
+function pickCols(symCount) {
+  const target = Math.sqrt(symCount);
+  let best = COLS_CANDIDATES[0];
+  for (const c of COLS_CANDIDATES) if (Math.abs(c - target) < Math.abs(best - target)) best = c;
+  return best;
+}
+
 // Decodes Opus packets back to PCM. Missing packets become silence of one frame.
 async function decodeOpus(packets, totalSamples) {
   const pcm = new Float32Array(packets.length * FRAME);
@@ -732,12 +745,14 @@ $('encodeBtn').onclick = async () => {
     const { packets, n } = await encodeOpus(inBuffer, bitrate);
     const { payload, streamLen, B } = buildPayload(packets, n);
 
-    // Layout: row 0 = calibration (cols 0..3 = tones 0..3), data from row 1
+    // Layout: row 0 = calibration (tones 0..3 repeated), data from row 1
     const syms = bytesToSymbols(payload);
+    const COLS = pickCols(syms.length);
     const rows = 1 + Math.ceil(syms.length / COLS);
-    if (rows > 5000) throw new Error('clip too large for one image. Choose a lower quality.');
+    if (rows > 1500) throw new Error('clip too large for one image. Choose a lower quality.');
 
     const gw = COLS + 2, gh = rows + 2;
+    const CELL = Math.max(CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / Math.max(gw, gh))));
     const cv = $('codeCanvas');
     cv.width = gw * CELL + PAD * 2;
     cv.height = gh * CELL + PAD * 2;
@@ -745,12 +760,9 @@ $('encodeBtn').onclick = async () => {
     g.fillStyle = '#fff';
     g.fillRect(0, 0, cv.width, cv.height);
 
-    const cellXY = (row, col) => [PAD + (col + 1) * CELL, PAD + (row + 1) * CELL];
     const fillCell = (row, col, colour) => {
-      const [x, y] = cellXY(row, col);
-      const inset = (CELL - DOT) / 2;
       g.fillStyle = colour;
-      g.fillRect(x + inset, y + inset, DOT, DOT);
+      g.fillRect(PAD + (col + 1) * CELL, PAD + (row + 1) * CELL, CELL, CELL);
     };
 
     g.fillStyle = '#000';
@@ -759,7 +771,7 @@ $('encodeBtn').onclick = async () => {
     g.fillRect(PAD, PAD, CELL, gh * CELL);
     g.fillRect(PAD + (gw - 1) * CELL, PAD, CELL, gh * CELL);
 
-    for (let c = 0; c < 4; c++) fillCell(0, c, CSS_PALETTE[c]);
+    for (let c = 0; c < CAL_CELLS; c++) fillCell(0, c, CSS_PALETTE[c % 4]);
     for (let k = 0; k < syms.length; k++)
       fillCell(1 + Math.floor(k / COLS), k % COLS, CSS_PALETTE[syms[k]]);
 
@@ -767,7 +779,8 @@ $('encodeBtn').onclick = async () => {
     $('codeResult').hidden = false;
     setStatus('inStatus',
       `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · 4 grey tones\n` +
-      `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${cv.width}×${cv.height} px`);
+      `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${COLS} cols · ${cv.width}×${cv.height} px` +
+      (Math.max(cv.width, cv.height) > 2300 ? '\nThis image is large. For Messenger, a lower quality (10–16 kbps) or sending as a file works better.' : ''));
   } catch (e) {
     setStatus('inStatus', 'Could not generate the code: ' + e.message, true);
   }
@@ -795,7 +808,8 @@ function loadImage(file) {
   });
 }
 
-// Reads tone symbols from the image. Returns readSym(k) = tone | (uncertain ? 4 : 0).
+// Locates the code in the image and returns makeReader(cols), which reads tone symbols.
+// readSym(k) -> { s: tone 0..3, q: ambiguity 0..1 (nearest distance / second nearest distance) }
 function readCode(img) {
   const scale = Math.min(1, 16000 / Math.max(img.naturalWidth, img.naturalHeight));
   const cv = document.createElement('canvas');
@@ -805,103 +819,170 @@ function readCode(img) {
   g.drawImage(img, 0, 0, cv.width, cv.height);
   const { data, width, height } = g.getImageData(0, 0, cv.width, cv.height);
 
-  const isDark = (x, y) => {
-    const i = (y * width + x) * 4;
-    return data[i + 3] > 128 && data[i] < 60 && data[i + 1] < 60 && data[i + 2] < 60;
-  };
-
-  let x0 = width, y0 = height, x1 = -1, y1 = -1;
+  // Frame detection by projection: the black frame makes whole rows and columns dark,
+  // so it survives blur, JPEG noise and stray dark pixels far better than a bounding box.
+  const rowCnt = new Uint32Array(height), colCnt = new Uint32Array(width);
   for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++)
-      if (isDark(x, y)) {
-        if (x < x0) x0 = x; if (x > x1) x1 = x;
-        if (y < y0) y0 = y; if (y > y1) y1 = y;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i + 3] > 128 && 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2] < 80) {
+        rowCnt[y]++; colCnt[x]++;
       }
-  if (x1 < 0) throw new Error('no code frame found');
-
-  const cell = (x1 - x0 + 1) / (COLS + 2);
-  const r = cell * 0.2;
-
-  const sampleRGB = (row, col) => {
-    const cx = x0 + (col + 1.5) * cell, cy = y0 + (row + 1.5) * cell;
-    const pts = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
-    let R = 0, G = 0, B = 0;
-    for (const [dx, dy] of pts) {
-      const px = Math.min(width - 1, Math.max(0, Math.floor(cx + dx)));
-      const py = Math.min(height - 1, Math.max(0, Math.floor(cy + dy)));
-      const i = (py * width + px) * 4;
-      R += data[i]; G += data[i + 1]; B += data[i + 2];
     }
-    return [R / pts.length, G / pts.length, B / pts.length];
+  let mr = 0, mc = 0;
+  for (let y = 0; y < height; y++) if (rowCnt[y] > mr) mr = rowCnt[y];
+  for (let x = 0; x < width; x++) if (colCnt[x] > mc) mc = colCnt[x];
+  if (mr < 20 || mc < 20) throw new Error('no code frame found');
+  let x0 = -1, x1 = -1, y0 = -1, y1 = -1;
+  for (let x = 0; x < width; x++) if (colCnt[x] >= mc * 0.5) { if (x0 < 0) x0 = x; x1 = x; }
+  for (let y = 0; y < height; y++) if (rowCnt[y] >= mr * 0.5) { if (y0 < 0) y0 = y; y1 = y; }
+
+  // Sub-pixel frame edges: scan the mean luminance from the white margin inwards and
+  // interpolate where it crosses mid-grey. A 1 px error in the frame size would drift
+  // by many cells across a 300-column grid, so this precision matters.
+  const colMean = new Float32Array(width), rowMean = new Float32Array(height);
+  const lumAt = (x, y) => { const i = (y * width + x) * 4; return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]; };
+  for (let x = Math.max(0, x0 - 6); x <= Math.min(width - 1, x1 + 6); x++) {
+    let s = 0; for (let y = y0; y <= y1; y++) s += lumAt(x, y);
+    colMean[x] = s / (y1 - y0 + 1);
+  }
+  for (let y = Math.max(0, y0 - 6); y <= Math.min(height - 1, y1 + 6); y++) {
+    let s = 0; for (let x = x0; x <= x1; x++) s += lumAt(x, y);
+    rowMean[y] = s / (x1 - x0 + 1);
+  }
+  // returns the outer edge (continuous coordinate) or null; dir = +1 scans up from lo, -1 scans down from hi
+  const edge = (m, lo, hi, dir, fallback) => {
+    const a = Math.max(1, lo - 4), b = Math.min(m.length - 2, hi + 4);
+    if (dir > 0) {
+      for (let i = a; i <= hi + 4 && i <= b; i++)
+        if (m[i - 1] >= 127.5 && m[i] < 127.5) {
+          const e = (i - 1) + 0.5 + (m[i - 1] - 127.5) / (m[i - 1] - m[i]);
+          return Math.abs(e - fallback) <= 3 ? e : fallback;
+        }
+    } else {
+      for (let i = b; i >= lo - 4 && i >= a; i--)
+        if (m[i + 1] >= 127.5 && m[i] < 127.5) {
+          const e = i + 0.5 + (127.5 - m[i]) / (m[i + 1] - m[i]);
+          return Math.abs(e - fallback) <= 3 ? e : fallback;
+        }
+    }
+    return fallback;
   };
+  const xl = edge(colMean, x0, x1, +1, x0), xr = edge(colMean, x0, x1, -1, x1 + 1);
+  const yt = edge(rowMean, y0, y1, +1, y0), yb = edge(rowMean, y0, y1, -1, y1 + 1);
+  const W = xr - xl, H = yb - yt;
 
-  // Calibration from row 0
-  const ref = [0, 1, 2, 3].map(c => sampleRGB(0, c));
-  for (let a = 0; a < 4; a++)
-    for (let b = a + 1; b < 4; b++) {
-      const d = Math.hypot(ref[a][0] - ref[b][0], ref[a][1] - ref[b][1], ref[a][2] - ref[b][2]);
-      if (d < 40) throw new Error('tones are too similar to tell apart. Try better lighting.');
+  function makeReader(cols, rowsFix) {
+    const cellX = W / (cols + 2);
+    const rowsObs = rowsFix || (Math.round(H / cellX) - 2);
+    if (rowsObs < 2) throw new Error('frame shape does not fit');
+    const cellY = H / (rowsObs + 2);
+    const offs = [];
+    for (const a of [-1, 0, 1]) for (const b of [-1, 0, 1]) offs.push([a * 0.15 * cellX, b * 0.15 * cellY]);
+
+    const sampleRGB = (row, col) => {
+      const cx = xl + (col + 1.5) * cellX, cy = yt + (row + 1.5) * cellY;
+      let R = 0, G = 0, B = 0;
+      for (const [dx, dy] of offs) {
+        const px = Math.min(width - 1, Math.max(0, Math.floor(cx + dx)));
+        const py = Math.min(height - 1, Math.max(0, Math.floor(cy + dy)));
+        const i = (py * width + px) * 4;
+        R += data[i]; G += data[i + 1]; B += data[i + 2];
+      }
+      return [R / offs.length, G / offs.length, B / offs.length];
+    };
+
+    // Calibration: average every cell of row 0 that carries the same tone
+    const ref = [0, 1, 2, 3].map(() => [0, 0, 0]);
+    const cnt = [0, 0, 0, 0];
+    for (let c = 0; c < CAL_CELLS; c++) {
+      const rgb = sampleRGB(0, c), t = c % 4;
+      for (let k = 0; k < 3; k++) ref[t][k] += rgb[k];
+      cnt[t]++;
     }
+    for (let t = 0; t < 4; t++) for (let k = 0; k < 3; k++) ref[t][k] /= cnt[t];
+    for (let a = 0; a < 4; a++)
+      for (let b = a + 1; b < 4; b++) {
+        const d = Math.hypot(ref[a][0] - ref[b][0], ref[a][1] - ref[b][1], ref[a][2] - ref[b][2]);
+        if (d < 30) throw new Error('tones are too similar to tell apart. Try better lighting.');
+      }
 
-  const classify = ([R, G, B]) => {
-    let best = 0, d1 = Infinity, d2 = Infinity;
-    for (let s = 0; s < 4; s++) {
-      const d = Math.hypot(R - ref[s][0], G - ref[s][1], B - ref[s][2]);
-      if (d < d1) { d2 = d1; d1 = d; best = s; }
-      else if (d < d2) d2 = d;
-    }
-    const uncertain = d1 > AMB_RATIO * d2;
-    return best | (uncertain ? 4 : 0);
-  };
+    const classify = ([R, G, B]) => {
+      let best = 0, d1 = Infinity, d2 = Infinity;
+      for (let s = 0; s < 4; s++) {
+        const d = Math.hypot(R - ref[s][0], G - ref[s][1], B - ref[s][2]);
+        if (d < d1) { d2 = d1; d1 = d; best = s; }
+        else if (d < d2) d2 = d;
+      }
+      return { s: best, q: d2 > 0 ? d1 / d2 : 1 };
+    };
 
-  const readSym = k => classify(sampleRGB(1 + Math.floor(k / COLS), k % COLS));
-  return { readSym };
+    return { readSym: k => classify(sampleRGB(1 + Math.floor(k / cols), k % cols)), rowsObs };
+  }
+  return { makeReader };
 }
 
-// Reads byte i from 4 symbols; the byte is "erased" if any symbol is uncertain.
+// Reads byte i from 4 symbols; q is the worst ambiguity of its symbols.
 function makeByteReader(readSym) {
   return i => {
-    let v = 0, er = false;
+    let v = 0, q = 0;
     for (let j = 0; j < 4; j++) {
-      const code = readSym(i * 4 + j);
-      v = (v << 2) | (code & 3);
-      if (code & 4) er = true;
+      const r = readSym(i * 4 + j);
+      v = (v << 2) | r.s;
+      if (r.q > q) q = r.q;
     }
-    return { v, er };
+    return { v, q };
   };
 }
 
-function mode(values) {
-  const count = new Map();
-  for (const v of values) count.set(v, (count.get(v) || 0) + 1);
-  let best = values[0], bc = 0;
-  for (const [v, c] of count) if (c > bc) { bc = c; best = v; }
-  return best;
-}
-
-function parseCode(readSym) {
-  const readByte = makeByteReader(readSym);
-
-  // Header: majority vote over the copies that are not uncertain
+// Header: every 2-bit symbol is voted separately over the copies, weighted by confidence,
+// so one doubtful symbol no longer spoils a whole byte.
+function parseHeader(readSym) {
   const hdr = new Uint8Array(HDR_LEN);
   for (let f = 0; f < HDR_LEN; f++) {
-    const votes = [];
-    for (let c = 0; c < HDR_COPIES; c++) {
-      const r = readByte(c * HDR_LEN + f);
-      if (!r.er) votes.push(r.v);
+    let v = 0;
+    for (let j = 0; j < 4; j++) {
+      const w = [0, 0, 0, 0];
+      for (let c = 0; c < HDR_COPIES; c++) {
+        const r = readSym((c * HDR_LEN + f) * 4 + j);
+        w[r.s] += 1.05 - Math.min(1, r.q);
+      }
+      let best = 0;
+      for (let s = 1; s < 4; s++) if (w[s] > w[best]) best = s;
+      v = (v << 2) | best;
     }
-    if (!votes.length) throw new Error('header is unreadable');
-    hdr[f] = mode(votes);
+    hdr[f] = v;
   }
-  if (hdr[0] !== MAGIC[0] || hdr[1] !== MAGIC[1])
-    throw new Error('this image is not a Sonocode, or it is too unclear');
-
+  if (hdr[0] !== MAGIC[0] || hdr[1] !== MAGIC[1]) throw new Error('magic mismatch');
   const totalSamples = u32(hdr, 2);
   const packetCount = (hdr[6] << 8) | hdr[7];
   const streamLen = u32(hdr, 8);
   if (totalSamples <= 0 || totalSamples > SR * MAX_SEC + FRAME) throw new Error('corrupt header (length)');
   if (packetCount <= 0 || packetCount > 10000) throw new Error('corrupt header (packet count)');
   if (streamLen <= 0 || streamLen > 1000000) throw new Error('corrupt header (size)');
+  return { totalSamples, packetCount, streamLen };
+}
+
+// Finds the column count: the right one gives a valid header AND the expected number of rows.
+function locateLayout(rc) {
+  for (const cols of COLS_CANDIDATES) {
+    try {
+      const rd = rc.makeReader(cols);
+      const h = parseHeader(rd.readSym);
+      const B = Math.ceil(h.streamLen / K);
+      const symTotal = (HDR_LEN * HDR_COPIES + N * B) * 4;
+      const rowsExpected = 1 + Math.ceil(symTotal / cols);
+      if (Math.abs(rowsExpected - rd.rowsObs) > 1) continue;
+      // The header tells the exact row count, so use it to get the vertical pitch right.
+      return { rd: rc.makeReader(cols, rowsExpected), h, cols };
+    } catch (e) { /* try the next candidate */ }
+  }
+  throw new Error('code not recognised. The image may be too blurry, cropped, or not a Sonocode');
+}
+
+function parseBody(readSym, h) {
+  const readByte = makeByteReader(readSym);
+  const { totalSamples, packetCount, streamLen } = h;
 
   // Reed-Solomon blocks
   const B = Math.ceil(streamLen / K);
@@ -910,14 +991,25 @@ function parseCode(readSym) {
   let failedBlocks = 0, erasedBytes = 0;
   for (let b = 0; b < B; b++) {
     const cw = new Uint8Array(N);
-    const erasures = [];
+    let cand = [];
     for (let i = 0; i < N; i++) {
       const r = readByte(base + i * B + b);
       cw[i] = r.v;
-      if (r.er) { erasures.push(i); erasedBytes++; }
+      if (r.q > AMB_RATIO) cand.push([i, r.q]);
     }
-    const msg = rsDecode(cw, erasures);
-    if (!msg) { failedBlocks++; continue; }
+    // at most NSYM erasures: keep the most doubtful bytes
+    if (cand.length > NSYM) { cand.sort((a, c) => c[1] - a[1]); cand = cand.slice(0, NSYM); }
+    const eras = cand.map(x => x[0]);
+    let msg = rsDecode(cw, eras);
+    if (!msg && eras.length) msg = rsDecode(cw, []);   // fall back to errors-only decoding
+    erasedBytes += eras.length;
+    if (!msg) {
+      // Too damaged to correct: keep the raw bytes anyway. The per-packet CRC will still
+      // accept every packet that happens to be intact, instead of losing the whole clip.
+      failedBlocks++;
+      for (let i = 0; i < K; i++) stream[i * B + b] = cw[i];
+      continue;
+    }
     for (let i = 0; i < K; i++) stream[i * B + b] = msg[i];
   }
 
@@ -949,8 +1041,9 @@ async function decodeImage(file) {
   setStatus('outStatus', 'Reading image…');
   try {
     const img = await loadImage(file);
-    const { readSym } = readCode(img);
-    const { packets, totalSamples, missing, failedBlocks, erasedBytes, B } = parseCode(readSym);
+    const rc = readCode(img);
+    const { rd, h } = locateLayout(rc);
+    const { packets, totalSamples, missing, failedBlocks, erasedBytes, B } = parseBody(rd.readSym, h);
 
     const samples = await decodeOpus(packets, totalSamples);
     out = { samples, sr: SR, duration: samples.length / SR };
