@@ -89,11 +89,7 @@
 <header>
   <h1>Sonocode</h1>
   <p class="lead">
-    Sonocode turns a sound clip of up to 10 seconds into a printable image. Audio is compressed with Opus
-    in your browser, protected with Reed-Solomon error correction, and stored as four brightness levels
-    (soft colour or plain grey) with a calibration row. Only brightness carries data, so a black-and-white
-    copy of the image decodes just the same. Each audio packet carries its own checksum, so a damaged part is concealed instead of
-    failing the whole clip.
+    Turn a short sound clip (up to 1 minute) into an image, and play it back from the image later.
   </p>
 </header>
 
@@ -105,7 +101,7 @@
       <span class="idx">01</span>
       <h2>Sound to Code</h2>
     </div>
-    <p class="desc">Upload an audio file or record directly. Up to 10 seconds are used.</p>
+    <p class="desc">Upload an audio file or record directly. Only the first part, up to the chosen maximum duration, is used.</p>
 
     <div class="wave"><canvas id="inWave"></canvas></div>
     <div class="meta">
@@ -124,6 +120,15 @@
         <option value="dots" selected>Soft dots</option>
         <option value="soft">Soft squares</option>
         <option value="classic">Classic grey</option>
+      </select>
+      <select id="maxDur" aria-label="Maximum duration">
+        <option value="5">Max 5 s</option>
+        <option value="10" selected>Max 10 s</option>
+        <option value="15">Max 15 s</option>
+        <option value="20">Max 20 s</option>
+        <option value="30">Max 30 s</option>
+        <option value="45">Max 45 s</option>
+        <option value="60">Max 60 s (1 min)</option>
       </select>
       <select id="quality" aria-label="Quality">
         <option value="6000">Lowest · Opus 6 kbps</option>
@@ -180,7 +185,8 @@
 
 <script>
 // ============ Configuration ============
-const MAX_SEC = 10;          // longest clip used, in seconds
+const MAX_SEC_LIMIT = 60;    // absolute longest clip the format accepts, in seconds
+const DEFAULT_MAX_SEC = 10;  // initial value of the duration menu
 const SR = 48000;            // Opus native rate
 const FRAME = 960;           // 20 ms Opus frame at 48 kHz
 const FRAME_US = 20000;      // frame duration in microseconds
@@ -199,7 +205,9 @@ const HDR_COPIES = 5;        // header is written five times and voted symbol by
 const COLS_CANDIDATES = [];
 for (let c = 100; c <= 440; c += 10) COLS_CANDIDATES.push(c);
 const CAL_CELLS = 40;        // calibration row: tones 0,1,2,3 repeated over the first 40 cells
-const TARGET_PX = 2000;      // aim for an image no larger than this on its longest side
+const TARGET_PX = 2000;      // aim for an image no larger than this on its longest side (while the grid is still square-ish)
+const COLS_MAX = 300;        // density cap: never more columns than this. Beyond it the image grows taller instead.
+const MAX_IMG_H = 24000;     // tallest image the generator will draw, in pixels
 const CELL_MIN = 5, CELL_MAX = 12;   // cell size in pixels (cells are fully filled, no gaps)
 const PAD = 24;              // quiet zone in pixels
 
@@ -239,6 +247,7 @@ const toneColor = (style, tone, t) => rgbCss(toneRGB(style, tone, t));
 const frameColor = (style, t) => style === 'classic' ? '#000' : rgbCss(yccRGB(26, hueAt(t), 20));
 
 const $ = id => document.getElementById(id);
+const maxSec = () => Number($('maxDur').value) || DEFAULT_MAX_SEC;
 const setStatus = (id, msg, isErr = false) => {
   const el = $(id);
   el.textContent = msg;
@@ -529,10 +538,13 @@ let codeBlob = null;
 const updateEncodeBtn = () => {
   $('encodeBtn').disabled = !OPUS_SUPPORTED || !inBuffer || (mediaRec && mediaRec.state === 'recording');
 };
+let inLabel = '';
 function showInputInfo(buf, label) {
-  const extra = buf.duration > MAX_SEC ? ` · only first ${MAX_SEC} s will be used` : '';
+  inLabel = label;
+  const extra = buf.duration > maxSec() ? ` · only first ${maxSec()} s will be used` : '';
   $('inInfo').textContent = `${label} · ${buf.duration.toFixed(2)} s${extra}`;
 }
+$('maxDur').onchange = () => { if (inBuffer) showInputInfo(inBuffer, inLabel); };
 async function loadFile(file) {
   setStatus('inStatus', 'Decoding audio…');
   try {
@@ -562,6 +574,7 @@ function setRecording(on) {
   $('recBtn').textContent = on ? 'Stop' : 'Record';
   $('audioFile').disabled = on;
   $('quality').disabled = on;
+  $('maxDur').disabled = on;
   $('style').disabled = on;
   $('timer').textContent = on ? '0.0 s' : '';
   updateEncodeBtn();
@@ -590,9 +603,9 @@ async function startRecording() {
   mediaRec.start();
   recStart = performance.now();
   setRecording(true);
-  setStatus('inStatus', `Recording… stops automatically after ${MAX_SEC} seconds.`);
+  setStatus('inStatus', `Recording… stops automatically after ${maxSec()} seconds.`);
   liveTick();
-  recTimeout = setTimeout(stopRecording, MAX_SEC * 1000);
+  recTimeout = setTimeout(stopRecording, maxSec() * 1000);
 }
 function stopRecording() {
   clearTimeout(recTimeout);
@@ -623,7 +636,7 @@ $('recBtn').onclick = () => {
 
 // ============ Opus encode / decode (WebCodecs) ============
 async function encodeOpus(buffer, bitrate) {
-  const n = Math.max(1, Math.floor(Math.min(buffer.duration, MAX_SEC) * SR));
+  const n = Math.max(1, Math.floor(Math.min(buffer.duration, maxSec()) * SR));
   const frames = Math.ceil(n / FRAME);
 
   const off = new OfflineAudioContext(1, frames * FRAME, SR);
@@ -718,9 +731,12 @@ function buildPayload(packets, totalSamples) {
 
 // Picks the column count that makes the grid closest to square.
 function pickCols(symCount) {
-  const target = Math.sqrt(symCount);
+  const target = Math.min(Math.sqrt(symCount), COLS_MAX);
   let best = COLS_CANDIDATES[0];
-  for (const c of COLS_CANDIDATES) if (Math.abs(c - target) < Math.abs(best - target)) best = c;
+  for (const c of COLS_CANDIDATES) {
+    if (c > COLS_MAX) break;
+    if (Math.abs(c - target) < Math.abs(best - target)) best = c;
+  }
   return best;
 }
 
@@ -784,14 +800,15 @@ $('encodeBtn').onclick = async () => {
     const syms = bytesToSymbols(payload);
     const COLS = pickCols(syms.length);
     const rows = 1 + Math.ceil(syms.length / COLS);
-    if (rows > 1500) throw new Error('clip too large for one image. Choose a lower quality.');
-
     const gw = COLS + 2, gh = rows + 2;
+    // Tall mode: once the column cap is reached the cell size follows the width only, so the image just gets taller.
+    const tall = Math.sqrt(syms.length) > COLS_MAX;
     // Dots need room to look round, so that mode always uses cells of at least 8 px (a larger image)
     const dots = look === 'dots';
-    const CELL = Math.max(dots ? DOT_CELL_MIN : CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / Math.max(gw, gh))));
+    const CELL = Math.max(dots ? DOT_CELL_MIN : CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / (tall ? gw : Math.max(gw, gh)))));
     const BAND = 48;                       // caption strip below the grid (not read by the decoder)
     const gridH = gh * CELL;
+    if (gridH + PAD * 2 + BAND > MAX_IMG_H) throw new Error('clip too large for one image. Choose a lower quality or a shorter maximum duration.');
     const cv = $('codeCanvas');
     cv.width = gw * CELL + PAD * 2;
     cv.height = gridH + PAD * 2 + BAND;
@@ -863,7 +880,8 @@ $('encodeBtn').onclick = async () => {
     setStatus('inStatus',
       `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · ${look === 'classic' ? 'grey' : dots ? 'soft dots' : 'soft squares'}, 4 brightness levels\n` +
       `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${COLS} cols · ${cv.width}×${cv.height} px` +
-      (Math.max(cv.width, cv.height) > (dots ? 4200 : 2300) ? '\nThis image is large. For Messenger, a lower quality (10–16 kbps) or sending as a file works better.' : ''));
+      (cv.height > cv.width * 1.3 ? `\nTall image (density capped at ${COLS_MAX} columns). Chat apps may shrink it, so send it as a file, or use a lower quality / shorter duration.`
+      : Math.max(cv.width, cv.height) > (dots ? 4200 : 2300) ? '\nThis image is large. For Messenger, a lower quality (10–16 kbps) or sending as a file works better.' : ''));
   } catch (e) {
     setStatus('inStatus', 'Could not generate the code: ' + e.message, true);
   }
@@ -894,7 +912,7 @@ function loadImage(file) {
 // Locates the code in the image and returns makeReader(cols), which reads tone symbols.
 // readSym(k) -> { s: tone 0..3, q: ambiguity 0..1 (nearest distance / second nearest distance) }
 function readCode(img) {
-  const scale = Math.min(1, 16000 / Math.max(img.naturalWidth, img.naturalHeight));
+  const scale = Math.min(1, MAX_IMG_H / Math.max(img.naturalWidth, img.naturalHeight));
   const cv = document.createElement('canvas');
   cv.width = Math.round(img.naturalWidth * scale);
   cv.height = Math.round(img.naturalHeight * scale);
@@ -1099,7 +1117,7 @@ function parseHeader(readSym) {
   const totalSamples = u32(hdr, 2);
   const packetCount = (hdr[6] << 8) | hdr[7];
   const streamLen = u32(hdr, 8);
-  if (totalSamples <= 0 || totalSamples > SR * MAX_SEC + FRAME) throw new Error('corrupt header (length)');
+  if (totalSamples <= 0 || totalSamples > SR * MAX_SEC_LIMIT + FRAME) throw new Error('corrupt header (length)');
   if (packetCount <= 0 || packetCount > 10000) throw new Error('corrupt header (packet count)');
   if (streamLen <= 0 || streamLen > 1000000) throw new Error('corrupt header (size)');
   return { totalSamples, packetCount, streamLen };
@@ -1114,7 +1132,8 @@ function locateLayout(rc) {
       const B = Math.ceil(h.streamLen / K);
       const symTotal = (HDR_LEN * HDR_COPIES + N * B) * 4;
       const rowsExpected = 1 + Math.ceil(symTotal / cols);
-      if (Math.abs(rowsExpected - rd.rowsObs) > 1) continue;
+      // tall images: the row estimate drifts a little over thousands of rows, so allow a small relative error
+      if (Math.abs(rowsExpected - rd.rowsObs) > Math.max(1, Math.ceil(rowsExpected * 0.004))) continue;
       // The header tells the exact row count, so use it to get the vertical pitch right.
       return { rd: rc.makeReader(cols, rowsExpected), h, cols };
     } catch (e) { /* try the next candidate */ }
