@@ -58,6 +58,15 @@
     background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2371717a' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 12px center;
     font: inherit; color: var(--ink); cursor: pointer;
   }
+  .size-box { display: inline-flex; align-items: center; gap: 6px; color: var(--mute); min-width: 0; max-width: 100%; }
+  input[type=number] {
+    -moz-appearance: textfield; appearance: textfield; width: 84px; min-width: 0; flex: 0 1 auto; padding: 9px 10px;
+    border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink);
+    font: inherit; text-align: center; font-variant-numeric: tabular-nums;
+  }
+  input[type=number]::-webkit-outer-spin-button, input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .hint { color: var(--mute); font-size: 12px; margin-top: 10px; }
   .timer { font-variant-numeric: tabular-nums; color: var(--rec); font-size: 13px; min-width: 42px; }
 
   .result { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line);
@@ -91,6 +100,8 @@
     .panel { padding: 18px; }
     .toolbar > * { flex: 1 1 auto; justify-content: center; }
     .spacer { display: none; }
+    .size-box { flex: 1 1 100%; }
+    .size-box input { flex: 1 1 0; width: 0; min-width: 0; }
   }
 </style>
 </head>
@@ -131,6 +142,16 @@
         <option value="soft">Soft squares</option>
         <option value="classic">Classic grey</option>
       </select>
+      <select id="sizeMode" aria-label="Image size">
+        <option value="auto" selected>Size: Auto</option>
+        <option value="custom">Size: Custom</option>
+      </select>
+      <span class="size-box" id="sizeBox" hidden>
+        <input type="number" id="cw" inputmode="numeric" min="200" step="10" placeholder="Width" aria-label="Width in pixels">
+        <span aria-hidden="true">&times;</span>
+        <input type="number" id="ch" inputmode="numeric" min="200" step="10" placeholder="Height" aria-label="Height in pixels">
+        <span>px</span>
+      </span>
       <select id="maxDur" aria-label="Maximum duration">
         <option value="5">Max 5 s</option>
         <option value="10" selected>Max 10 s</option>
@@ -148,6 +169,12 @@
         <option value="32000">Max · Opus 32 kbps</option>
       </select>
       <button class="btn primary" id="encodeBtn" disabled>Generate code</button>
+    </div>
+
+    <div class="hint" id="sizeHint" hidden>
+      Custom size: width and height in pixels, with the longer side at most 3&times; the shorter one. The grid is fitted
+      inside the image with the largest square cells that fit. If the image is too small for the clip, the
+      minimum size is shown.
     </div>
 
     <div class="result" id="codeResult" hidden>
@@ -220,6 +247,9 @@ const COLS_MAX = 300;        // density cap: never more columns than this. Beyon
 const MAX_IMG_H = 24000;     // tallest image the generator will draw, in pixels
 const CELL_MIN = 5, CELL_MAX = 12;   // cell size in pixels (cells are fully filled, no gaps)
 const PAD = 24;              // quiet zone in pixels
+const CUSTOM_RATIO_MAX = 3;  // custom size: longer side / shorter side may not exceed this (3 means 3:1 or 1:3)
+const CUSTOM_MIN_PX = 200;   // custom size: smallest accepted width or height
+const CUSTOM_MAX_AREA = 150e6; // custom size: most pixels a canvas may have
 
 // Only brightness (luma) carries data: four levels, well separated. The colour is free, so the
 // image can look soft and colourful and still decode the same after a black-and-white conversion.
@@ -770,6 +800,55 @@ function pickCols(symCount) {
   return best;
 }
 
+// ---- Custom image size ----
+let lastSize = null;
+$('sizeMode').onchange = () => {
+  const on = $('sizeMode').value === 'custom';
+  $('sizeBox').hidden = !on;
+  $('sizeHint').hidden = !on;
+  if (on && !$('cw').value && !$('ch').value) {
+    $('cw').value = lastSize ? lastSize.w : 1600;
+    $('ch').value = lastSize ? lastSize.h : 1600;
+  }
+};
+function readCustomSize() {
+  const W = Math.round(Number($('cw').value)), H = Math.round(Number($('ch').value));
+  if (!(W > 0) || !(H > 0)) throw new Error('enter both width and height in pixels.');
+  if (W < CUSTOM_MIN_PX || H < CUSTOM_MIN_PX) throw new Error(`width and height must each be at least ${CUSTOM_MIN_PX} px.`);
+  if (W > MAX_IMG_H || H > MAX_IMG_H) throw new Error(`width and height can be at most ${MAX_IMG_H} px.`);
+  if (Math.max(W, H) / Math.min(W, H) > CUSTOM_RATIO_MAX)
+    throw new Error(`the ratio is too extreme. The longer side can be at most ${CUSTOM_RATIO_MAX} times the shorter side (${CUSTOM_RATIO_MAX}:1 or 1:${CUSTOM_RATIO_MAX}).`);
+  if (W * H > CUSTOM_MAX_AREA) throw new Error('that image would have too many pixels. Choose a smaller size.');
+  return { W, H };
+}
+// Picks the column count that gives the largest square cell inside W x H.
+function fitCustom(symCount, W, H, cellMin, band) {
+  const aw = W - 2 * PAD, ah = H - 2 * PAD - band;
+  const dims = c => ({ cols: c, gw: c + 4, gh: 1 + Math.ceil(symCount / c) + 4 });
+  let best = null;
+  for (const c of COLS_CANDIDATES) {
+    const L = dims(c);
+    const cell = Math.floor(Math.min(aw / L.gw, ah / L.gh));
+    if (cell < 1) continue;
+    if (!best || cell > best.cell || (cell === best.cell && L.gw * L.gh < best.gw * best.gh)) best = { ...L, cell };
+  }
+  if (best && best.cell >= cellMin) return best;
+  // Too small: grow the image in the same shape until the clip fits, and report that size
+  let need = null;
+  for (let k = 1; k <= 400 && !need; k++) {
+    const w = Math.ceil(W * (1 + 0.02 * k) / 10) * 10, h = Math.ceil(H * (1 + 0.02 * k) / 10) * 10;
+    if (w > MAX_IMG_H || h > MAX_IMG_H) break;
+    const a2 = w - 2 * PAD, h2 = h - 2 * PAD - band;
+    for (const c of COLS_CANDIDATES) {
+      const L = dims(c);
+      if (Math.floor(Math.min(a2 / L.gw, h2 / L.gh)) >= cellMin) { need = { w, h }; break; }
+    }
+  }
+  throw new Error(`${W}×${H} px is too small for this clip.` +
+    (need ? ` In the same shape it needs about ${need.w}×${need.h} px or more. ` : ' ') +
+    'Choose a larger size, a lower quality, or a shorter maximum duration.');
+}
+
 // Decodes Opus packets back to PCM. Missing packets become silence of one frame.
 async function decodeOpus(packets, totalSamples) {
   const pcm = new Float32Array(packets.length * FRAME);
@@ -820,6 +899,7 @@ $('encodeBtn').onclick = async () => {
   setStatus('inStatus', 'Encoding…', false, true);
   await nextPaint();
   try {
+    if ($('sizeMode').value === 'custom') readCustomSize();   // fail early on a bad size, before the slow encoding
     const sup = await AudioEncoder.isConfigSupported({ codec: 'opus', sampleRate: SR, numberOfChannels: 1, bitrate });
     if (!sup.supported) throw new Error('this browser cannot encode Opus here');
 
@@ -832,20 +912,33 @@ $('encodeBtn').onclick = async () => {
     const look = $('style').value;                    // dots | soft | classic
     const style = look === 'classic' ? 'classic' : 'soft';
     const syms = bytesToSymbols(payload);
-    const COLS = pickCols(syms.length);
+    const custom = $('sizeMode').value === 'custom';
+    const dots = look === 'dots';          // dots need room to look round, so that mode uses cells of at least 8 px
+    const BAND = 48;                       // caption strip below the grid (not read by the decoder)
+    let COLS, CELL, imgW, imgH, OX = PAD, OY = PAD;
+    if (custom) {
+      // Custom size: the image is exactly W x H; the grid sits centred inside it with the largest square cells that fit.
+      const { W, H } = readCustomSize();
+      const fitted = fitCustom(syms.length, W, H, dots ? DOT_CELL_MIN : CELL_MIN, BAND);
+      COLS = fitted.cols; CELL = fitted.cell; imgW = W; imgH = H;
+      OX = Math.floor((W - fitted.gw * CELL) / 2);
+      OY = Math.max(PAD, Math.floor((H - (fitted.gh * CELL + PAD + BAND)) / 2));
+    } else {
+      COLS = pickCols(syms.length);
+      const gw0 = COLS + 4, gh0 = 1 + Math.ceil(syms.length / COLS) + 4;
+      // Tall mode: once the column cap is reached the cell size follows the width only, so the image just gets taller.
+      const tall = Math.sqrt(syms.length) > COLS_MAX;
+      CELL = Math.max(dots ? DOT_CELL_MIN : CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / (tall ? gw0 : Math.max(gw0, gh0)))));
+      imgW = gw0 * CELL + PAD * 2;
+      imgH = gh0 * CELL + PAD * 2 + BAND;
+      if (imgH > MAX_IMG_H) throw new Error('clip too large for one image. Choose a lower quality or a shorter maximum duration.');
+    }
     const rows = 1 + Math.ceil(syms.length / COLS);
     const gw = COLS + 4, gh = rows + 4;   // outer frame, timing ring, data
-    // Tall mode: once the column cap is reached the cell size follows the width only, so the image just gets taller.
-    const tall = Math.sqrt(syms.length) > COLS_MAX;
-    // Dots need room to look round, so that mode always uses cells of at least 8 px (a larger image)
-    const dots = look === 'dots';
-    const CELL = Math.max(dots ? DOT_CELL_MIN : CELL_MIN, Math.min(CELL_MAX, Math.floor(TARGET_PX / (tall ? gw : Math.max(gw, gh)))));
-    const BAND = 48;                       // caption strip below the grid (not read by the decoder)
-    const gridH = gh * CELL;
-    if (gridH + PAD * 2 + BAND > MAX_IMG_H) throw new Error('clip too large for one image. Choose a lower quality or a shorter maximum duration.');
+    const gridH = gh * CELL, gridW = gw * CELL;
     const cv = $('codeCanvas');
-    cv.width = gw * CELL + PAD * 2;
-    cv.height = gridH + PAD * 2 + BAND;
+    cv.width = imgW;
+    cv.height = imgH;
     const g = cv.getContext('2d');
     g.fillStyle = '#fff';
     g.fillRect(0, 0, cv.width, cv.height);
@@ -855,7 +948,7 @@ $('encodeBtn').onclick = async () => {
     const tAt = () => 0;
     const fillCell = (row, col, tone) => fillAt(col + 2, row + 2, tone);
     const fillAt = (gx, gy, tone) => {
-      const x = PAD + gx * CELL, y = PAD + gy * CELL;
+      const x = OX + gx * CELL, y = OY + gy * CELL;
       g.fillStyle = table[tone][tAt()];
       if (dots) { g.beginPath(); g.arc(x + CELL / 2, y + CELL / 2, CELL * DOT_RATIO / 2, 0, 6.2832); g.fill(); }
       else g.fillRect(x, y, CELL, CELL);
@@ -864,22 +957,22 @@ $('encodeBtn').onclick = async () => {
       // tinted ground behind the dots; its brightness sits between the levels, so blur that
       // mixes ground into a dot disturbs the dark and light levels about equally
       g.fillStyle = rgbCss(yccRGB(DOT_BG_LUMA, HUE, 14));
-      g.fillRect(PAD + CELL, PAD + CELL, (gw - 2) * CELL, (gh - 2) * CELL);
+      g.fillRect(OX + CELL, OY + CELL, (gw - 2) * CELL, (gh - 2) * CELL);
     }
 
     // Frame: dark (brightness well under 80) so the reader can find it; softly tinted in colour mode
-    const gh1 = g.createLinearGradient(PAD, 0, PAD + gw * CELL, 0);
-    const gv1 = g.createLinearGradient(0, PAD, 0, PAD + gridH);
+    const gh1 = g.createLinearGradient(OX, 0, OX + gw * CELL, 0);
+    const gv1 = g.createLinearGradient(0, OY, 0, OY + gridH);
     for (const t of [0, 0.5, 1]) {
       gh1.addColorStop(t, frameColor(style, t));
       gv1.addColorStop(t, frameColor(style, t));
     }
     g.fillStyle = gh1;
-    g.fillRect(PAD, PAD, gw * CELL, CELL);
-    g.fillRect(PAD, PAD + (gh - 1) * CELL, gw * CELL, CELL);
+    g.fillRect(OX, OY, gw * CELL, CELL);
+    g.fillRect(OX, OY + (gh - 1) * CELL, gw * CELL, CELL);
     g.fillStyle = gv1;
-    g.fillRect(PAD, PAD, CELL, gridH);
-    g.fillRect(PAD + (gw - 1) * CELL, PAD, CELL, gridH);
+    g.fillRect(OX, OY, CELL, gridH);
+    g.fillRect(OX + (gw - 1) * CELL, OY, CELL, gridH);
 
     // Timing ring just inside the frame: tones 0,3,0,3... The reader locks onto it to follow the
     // true cell positions across the whole photo (lens distortion, slight bending).
@@ -890,8 +983,7 @@ $('encodeBtn').onclick = async () => {
       fillCell(1 + Math.floor(k / COLS), k % COLS, syms[k]);
 
     // Caption strip: mini waveform of the clip and a label. Light on purpose and far from the frame.
-    const bandMid = PAD + gridH + PAD + BAND / 2;
-    const gridW = gw * CELL;
+    const bandMid = OY + gridH + PAD + BAND / 2;
     const ch = inBuffer.getChannelData(0), nS = Math.min(n, ch.length);
     const BARS = Math.max(10, Math.min(80, Math.floor((gridW - 190) / 9)));
     const peaks = [];
@@ -906,19 +998,21 @@ $('encodeBtn').onclick = async () => {
     peaks.forEach((pk, bI) => {
       const h = Math.max(4, (pk / mx) * (BAND - 12));
       g.fillStyle = style === 'classic' ? 'rgb(176,176,176)' : rgbCss(yccRGB(165, hueAt(bI / BARS), 40));
-      g.fillRect(PAD + bI * 9, bandMid - h / 2, 5, h);
+      g.fillRect(OX + bI * 9, bandMid - h / 2, 5, h);
     });
     g.fillStyle = 'rgb(140,140,140)';
     g.font = '600 15px Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
     g.textAlign = 'right';
     g.textBaseline = 'middle';
-    g.fillText(`Sonocode · ${(n / SR).toFixed(1)} s`, PAD + gridW, bandMid);
+    g.fillText(`Sonocode · ${(n / SR).toFixed(1)} s`, OX + gridW, bandMid);
 
     codeBlob = await new Promise(res => cv.toBlob(res, 'image/png'));
+    if (!codeBlob) throw new Error('the browser could not create an image this large. Choose a smaller size.');
+    lastSize = { w: cv.width, h: cv.height };
     $('codeResult').hidden = false;
     setStatus('inStatus',
-      `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · ${look === 'classic' ? 'grey' : dots ? 'soft dots' : 'soft squares'}, 4 brightness levels\n` +
-      `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${COLS} cols · ${cv.width}×${cv.height} px` +
+      `Code generated · ${(n / SR).toFixed(2)} s · Opus ${bitrate / 1000} kbps · ${look === 'classic' ? 'grey' : dots ? 'soft dots' : 'soft squares'}, 4 brightness levels${custom ? ' · custom size' : ''}\n` +
+      `${packets.length} packets · ${streamLen} bytes · ${B} RS blocks (255,223) · ${COLS} cols · ${CELL} px cells · ${cv.width}×${cv.height} px` +
       (cv.height > cv.width * 1.3 ? `\nTall image (density capped at ${COLS_MAX} columns). Chat apps may shrink it, so send it as a file, or use a lower quality / shorter duration.`
       : Math.max(cv.width, cv.height) > (dots ? 4200 : 2300) ? '\nThis image is large. For Messenger, a lower quality (10–16 kbps) or sending as a file works better.' : ''));
   } catch (e) {
